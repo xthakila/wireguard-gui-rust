@@ -1,0 +1,16 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Build artifacts / packaging output
+/dist
+/AppDir
+*.AppImage
+*.deb
+*.snap
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

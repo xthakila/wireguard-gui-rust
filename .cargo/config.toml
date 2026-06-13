@@ -1,0 +1,3 @@
+# Keep the dev box responsive during heavy iced/wgpu builds (8 cores, shared machine).
+[build]
+jobs = 4
