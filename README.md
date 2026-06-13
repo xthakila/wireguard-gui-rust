@@ -3,13 +3,24 @@
   <p><strong>A fast, lightweight, 100% pure-Rust WireGuard VPN manager for Linux.</strong></p>
 </div>
 
-> ⚠️ **Status: under active development (Phase 2 — UI core).** Not yet released. The pure-Rust
-> backend (Phase 1: profiles, keygen, store, tunnel backends, status, plan, settings,
-> single-instance, autostart, public-IP) is done and tested. The real Iced application is now
-> wired up (`src/app.rs` owns the frozen `State`/`Message` + reducer; `src/main.rs` drives the
-> tray + single-instance + windowed/daemon launch); the per-screen views in `src/ui/*` are
-> placeholder stubs being filled in next. This README will gain screenshots and install docs as
-> the build progresses.
+> ⚠️ **Status: under active development (Phase 3 — privileged backend + app wiring).** Not yet
+> released. The pure-Rust backend (Phase 1: profiles, keygen, store, tunnel backends, status,
+> plan, settings, single-instance, autostart, public-IP) is done and tested. The real Iced
+> application is wired up (`src/app.rs` owns the frozen `State`/`Message` + reducer; `src/main.rs`
+> drives the tray + single-instance + windowed/daemon launch).
+>
+> **Phase 3 (now integrated):** the root-only helper (`src/bin/helper.rs`, the single privileged
+> binary, launched via `pkexec` + one polkit action) implements the wg-quick fallback, the
+> nftables kill-switch (lockout-prevention allow-list + `systemd-run` dead-man lease),
+> per-app network namespaces, and the systemd connect-on-boot unit. The GUI never runs
+> privileged code — it builds a frozen `PrivCmd` (`src/net/privilege.rs`) and hands it to the
+> helper. `src/app.rs` now wires: **kill-switch** (arm on a successful connect when enabled,
+> disarm on disconnect; toggle in Settings), **auto-reconnect** (`src/net/watchdog.rs` pure
+> decision + exponential back-off, evaluated each status tick, suppressed on user disconnect),
+> and **connect-on-boot** (`src/net/boot.rs`: NetworkManager autoconnect on the non-root path,
+> or `BootEnableSystemd` via the helper for the wg-quick path). Kill-switch and connect-on-boot
+> are **OFF by default**. The per-screen views in `src/ui/*` are still being filled in. This
+> README will gain screenshots and install docs as the build progresses.
 
 A from-scratch [Rust](https://www.rust-lang.org/) rewrite of
 [`0xle0ne/wireguard-gui`](https://github.com/0xle0ne/wireguard-gui) — replacing the Tauri + Next.js

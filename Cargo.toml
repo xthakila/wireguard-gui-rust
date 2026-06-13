@@ -3,6 +3,18 @@ name = "wireguard-gui"
 version = "0.1.0"
 edition = "2024"
 
+# The GUI (default binary, from src/main.rs) and the root helper (src/bin/helper.rs).
+# Declared explicitly so the helper's binary name is stable regardless of file name and so
+# the GUI bin is not auto-shadowed once src/bin/ exists. The helper is the ONLY artifact that
+# runs as root (via pkexec + polkit action org.wireguardgui.rust.manage); the GUI never does.
+[[bin]]
+name = "wireguard-gui"
+path = "src/main.rs"
+
+[[bin]]
+name = "wireguard-gui-helper"
+path = "src/bin/helper.rs"
+
 [dependencies]
 # GUI + tray (proven Phase-0 spike deps).
 iced = { version = "0.14.0", features = ["tokio"] }

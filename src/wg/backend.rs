@@ -340,10 +340,19 @@ impl WgBackend for WgQuickBackend {
 /// Prefers `NmBackend` when `nmcli` is found on PATH; falls back to
 /// `WgQuickBackend`.
 pub async fn detect_backend() -> Box<dyn WgBackend> {
-    if tool_on_path("nmcli").await {
+    if detect_is_nm().await {
         return Box::new(NmBackend);
     }
     Box::new(WgQuickBackend)
+}
+
+/// True when the NetworkManager backend would be selected (i.e. `nmcli` is on PATH).
+///
+/// Used by callers that need to pick the connect-on-boot path (NM client-side
+/// autoconnect vs. the privileged wg-quick/systemd unit) without constructing a
+/// trait object.
+pub async fn detect_is_nm() -> bool {
+    tool_on_path("nmcli").await
 }
 
 /// Return true if `program` is found on PATH via `which`.

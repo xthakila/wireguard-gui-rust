@@ -122,19 +122,38 @@ pub fn settings(state: &State) -> Element<'_, Message> {
     .align_y(Alignment::Center)
     .padding(Padding::from([10u16, 0u16]));
 
-    // ── Advanced section (Phase 3 placeholders) ────────────────────────────────
-    let kill_switch_label = if s.kill_switch { "Enabled" } else { "Disabled" };
-    let kill_switch_row = info_row(
+    // ── Advanced section ───────────────────────────────────────────────────────
+    let kill_switch_row = toggle_row(
         "Kill switch",
-        "Block all traffic if the VPN tunnel drops. (Wired in Phase 3.)",
-        format!("{kill_switch_label} — Phase 3"),
+        "Block all non-tunnel traffic while the VPN is up; armed on connect, \
+         removed on disconnect.",
+        checkbox(s.kill_switch)
+            .on_toggle(Message::SettingKillSwitchToggled)
+            .into(),
     );
 
+    // Connect-on-boot binds the currently-selected profile to a boot unit. The
+    // checkbox is enabled only when a profile is active to bind to.
+    let active = state.active_profile.clone();
+    let boot_on = s.connect_on_boot.is_some();
     let boot_profile = s.connect_on_boot.as_deref().unwrap_or("(none)");
-    let connect_on_boot_row = info_row(
-        "Connect on boot",
-        format!("Profile to connect at startup. Currently: {boot_profile}"),
-        "Phase 3",
+    let connect_on_boot_checkbox = {
+        let cb = checkbox(boot_on);
+        match (boot_on, active) {
+            // Currently enabled — allow turning it off (clears the binding).
+            (true, _) => cb.on_toggle(|_| Message::SettingConnectOnBootChanged(None)),
+            // Disabled but a profile is active — allow binding it.
+            (false, Some(name)) => {
+                cb.on_toggle(move |_| Message::SettingConnectOnBootChanged(Some(name.clone())))
+            }
+            // Disabled and nothing to bind — leave the checkbox inert.
+            (false, None) => cb,
+        }
+    };
+    let connect_on_boot_row = toggle_row_owned(
+        "Connect on boot".to_string(),
+        format!("Connect a profile automatically at startup. Bound profile: {boot_profile}"),
+        connect_on_boot_checkbox.into(),
     );
 
     // ── assemble ───────────────────────────────────────────────────────────────
@@ -176,6 +195,26 @@ fn section_heading(label: &str) -> Element<'_, Message> {
 fn toggle_row<'a>(
     label: &'a str,
     description: &'a str,
+    widget: Element<'a, Message>,
+) -> Element<'a, Message> {
+    row![
+        column![text(label).size(14), text(description).size(12),]
+            .spacing(2)
+            .width(Length::Fill),
+        widget,
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .padding(Padding::from([10u16, 0u16]))
+    .into()
+}
+
+/// Like [`toggle_row`] but takes owned label/description strings so the row can
+/// carry text built at call time (e.g. interpolated profile names) without
+/// borrowing the caller's locals. The interactive widget is supplied by the caller.
+fn toggle_row_owned<'a>(
+    label: String,
+    description: String,
     widget: Element<'a, Message>,
 ) -> Element<'a, Message> {
     row![
