@@ -1,30 +1,17 @@
-// Crate-wide: the Phase-1 module skeleton is full of not-yet-wired-up public items whose
-// bodies are `todo!()`; silence the resulting dead-code warnings until Phase 2 wires them in.
+//! wireguard-gui-rust — a pure-Rust WireGuard GUI (Iced 0.14 + ksni system tray).
+//!
+//! `main` wires the load-bearing runtime pieces proven in the Phase-0 spike:
+//!   - single-instance enforcement (abstract-namespace Unix socket); a second launch signals
+//!     the primary to raise its window, then exits.
+//!   - a ksni system tray, bridged into iced messages, with runtime icon swap + close-to-tray.
+//!   - the real `iced::application` (or `iced::daemon` when started `--hidden`).
+//!
+//! The application state, reducer, and views live in `app` + `ui::*`.
+
+// Phase-2 CORE: the `ui::*` views are placeholder stubs and several Phase-1/3 items remain
+// unwired (netns, killswitch, privilege), so silence the resulting dead-code warnings for now.
 #![allow(dead_code)]
 
-//! Phase-0 spike for wireguard-gui-rust.
-//!
-//! Purpose: PROVE the load-bearing Iced 0.14 + ksni 0.3.5 patterns compile and run on this
-//! box before building the real app:
-//!   - functional `iced::application` builder + Task/Subscription
-//!   - a ksni tray bridged into iced messages via `iced::stream::channel`
-//!   - close-to-tray (intercept the window close, hide instead of quit)
-//!   - runtime tray icon swap via `handle.update()`
-//!
-//! This file is throwaway scaffolding; it gets replaced by the real `app.rs`/`main.rs` in Phase 2.
-
-use std::sync::{Mutex, OnceLock};
-
-use iced::futures::SinkExt;
-use iced::widget::{button, column, container, text};
-use iced::window;
-use iced::{Element, Length, Subscription, Task, Theme};
-use tokio::sync::mpsc::UnboundedReceiver;
-
-mod tray;
-use tray::{spawn_tray, AppTray, TrayEvent};
-
-// Phase-1 module skeleton (the shared contract). Bodies are `todo!()`; Phase 2 wires them in.
 mod app;
 mod autostart;
 mod config;
@@ -33,140 +20,69 @@ mod net;
 mod public_ip;
 mod settings;
 mod single_instance;
+mod tray;
+mod ui;
 mod wg;
 
-// The tray handle (for runtime icon updates) and the event receiver are created once in
-// `main` and stashed in globals so the iced `boot`/`subscription` (which take no args) can reach them.
-static TRAY_HANDLE: OnceLock<ksni::blocking::Handle<AppTray>> = OnceLock::new();
-static TRAY_EVENTS: OnceLock<Mutex<Option<UnboundedReceiver<TrayEvent>>>> = OnceLock::new();
+use app::State;
+use single_instance::{try_become_primary, InstanceResult};
+use tray::spawn_tray;
+
+// Free `fn` items (NOT closures) for the daemon callbacks. Using `fn`s sidesteps the
+// higher-ranked-lifetime inference failure that bites closures whose body returns a borrow
+// of the `&State` argument (`ViewFn ... is not general enough`).
+fn daemon_view(state: &State, _window: iced::window::Id) -> iced::Element<'_, app::Message> {
+    state.view()
+}
+fn daemon_title(state: &State, _window: iced::window::Id) -> String {
+    state.title()
+}
+fn daemon_theme(state: &State, _window: iced::window::Id) -> iced::Theme {
+    state.theme()
+}
 
 pub fn main() -> iced::Result {
-    let (handle, rx) = spawn_tray();
-    let _ = TRAY_HANDLE.set(handle);
-    let _ = TRAY_EVENTS.set(Mutex::new(Some(rx)));
+    // --- Single-instance: a second launch raises the primary's window then exits. ---
+    match try_become_primary() {
+        Ok(InstanceResult::Secondary) => {
+            // We already signalled the primary inside try_become_primary(); nothing more to do.
+            std::process::exit(0);
+        }
+        Ok(InstanceResult::Primary(guard, listener)) => {
+            // --- We are the primary. Parse flags, spawn the tray, stash runtime globals. ---
+            let start_hidden = std::env::args().any(|a| a == "--hidden");
 
-    iced::application(State::new, State::update, State::view)
-        .title("wireguard-gui-rust — spike")
-        .subscription(State::subscription)
-        .theme(|_state: &State| Theme::Dark)
-        .exit_on_close_request(false) // we intercept the close button for close-to-tray
-        .run()
-}
+            let (tray_handle, tray_events) = spawn_tray();
+            app::install_runtime(tray_handle, tray_events, guard, listener);
 
-#[derive(Default)]
-struct State {
-    connected: bool,
-    window_id: Option<window::Id>,
-    log: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-enum Message {
-    ToggleConnected,
-    TrayOpen,
-    TrayQuit,
-    WindowCloseRequested(window::Id),
-}
-
-impl State {
-    fn new() -> (Self, Task<Message>) {
-        (State::default(), Task::none())
-    }
-
-    fn update(&mut self, message: Message) -> Task<Message> {
-        match message {
-            Message::ToggleConnected => {
-                self.connected = !self.connected;
-                let connected = self.connected;
-                self.log.push(format!("toggle → connected={connected}"));
-                if let Some(handle) = TRAY_HANDLE.get() {
-                    // Swap the tray icon/title at runtime.
-                    handle.update(move |t: &mut AppTray| t.connected = connected);
-                }
-                Task::none()
-            }
-            Message::TrayOpen => {
-                self.log.push("tray: Open".into());
-                if let Some(id) = self.window_id {
-                    Task::batch([
-                        window::set_mode(id, window::Mode::Windowed),
-                        window::gain_focus(id),
-                    ])
-                } else {
-                    Task::none()
-                }
-            }
-            Message::TrayQuit => {
-                self.log.push("tray: Quit".into());
-                iced::exit()
-            }
-            Message::WindowCloseRequested(id) => {
-                // Close-to-tray: remember the window and hide it instead of quitting.
-                self.window_id = Some(id);
-                self.log.push("close → hide to tray".into());
-                window::set_mode(id, window::Mode::Hidden)
-            }
+            run_gui(start_hidden)
+        }
+        Err(e) => {
+            eprintln!("fatal: single-instance check failed: {e}");
+            std::process::exit(1);
         }
     }
-
-    fn view(&self) -> Element<'_, Message> {
-        let status = if self.connected {
-            "CONNECTED"
-        } else {
-            "disconnected"
-        };
-        let log_lines: String = self
-            .log
-            .iter()
-            .rev()
-            .take(8)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        container(
-            column![
-                text(format!("WireGuard status: {status}")).size(22),
-                button(text(if self.connected {
-                    "Disconnect (toggle)"
-                } else {
-                    "Connect (toggle)"
-                }))
-                .on_press(Message::ToggleConnected),
-                text("Close the window → it hides to the tray. Tray menu → Open / Quit.").size(13),
-                text(log_lines).size(12),
-            ]
-            .spacing(16)
-            .padding(24),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
-            Subscription::run(tray_event_stream),
-            window::close_requests().map(Message::WindowCloseRequested),
-        ])
-    }
 }
 
-/// Bridge the tray's event receiver into an iced subscription stream.
-fn tray_event_stream() -> impl iced::futures::Stream<Item = Message> {
-    iced::stream::channel(16, |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-        // Take the receiver out of the global (runs once for the lifetime of the app).
-        let rx = TRAY_EVENTS.get().and_then(|m| m.lock().unwrap().take());
-        if let Some(mut rx) = rx {
-            while let Some(event) = rx.recv().await {
-                let msg = match event {
-                    TrayEvent::Open => Message::TrayOpen,
-                    TrayEvent::Quit => Message::TrayQuit,
-                };
-                if output.send(msg).await.is_err() {
-                    break;
-                }
-            }
-        }
-    })
+/// Launch the iced GUI. `start_hidden` selects the daemon (window-less) path so the app can
+/// boot straight to the tray; otherwise we run a normal windowed application.
+fn run_gui(start_hidden: bool) -> iced::Result {
+    if start_hidden {
+        // Daemon mode: no window is created on boot. The tray "Open" action (or a single-instance
+        // raise) opens one on demand via `window::open` in the reducer.
+        iced::daemon(|| State::new_with(true), State::update, daemon_view)
+            .title(daemon_title)
+            .subscription(State::subscription)
+            .theme(daemon_theme)
+            .run()
+    } else {
+        // Normal windowed application; we intercept the close button for close-to-tray.
+        // Pass method references (not closures) so the view/title/theme lifetimes stay generic.
+        iced::application(State::new, State::update, State::view)
+            .title(State::title)
+            .subscription(State::subscription)
+            .theme(State::theme)
+            .exit_on_close_request(false)
+            .run()
+    }
 }

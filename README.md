@@ -3,8 +3,13 @@
   <p><strong>A fast, lightweight, 100% pure-Rust WireGuard VPN manager for Linux.</strong></p>
 </div>
 
-> ⚠️ **Status: under active development (Phase 0).** Not yet released. This README is a skeleton and
-> will be expanded with screenshots, install instructions, and full docs as the build progresses.
+> ⚠️ **Status: under active development (Phase 2 — UI core).** Not yet released. The pure-Rust
+> backend (Phase 1: profiles, keygen, store, tunnel backends, status, plan, settings,
+> single-instance, autostart, public-IP) is done and tested. The real Iced application is now
+> wired up (`src/app.rs` owns the frozen `State`/`Message` + reducer; `src/main.rs` drives the
+> tray + single-instance + windowed/daemon launch); the per-screen views in `src/ui/*` are
+> placeholder stubs being filled in next. This README will gain screenshots and install docs as
+> the build progresses.
 
 A from-scratch [Rust](https://www.rust-lang.org/) rewrite of
 [`0xle0ne/wireguard-gui`](https://github.com/0xle0ne/wireguard-gui) — replacing the Tauri + Next.js
