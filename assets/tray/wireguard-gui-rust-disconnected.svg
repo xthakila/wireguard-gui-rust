@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WireGuard GUI Rust — tray icon, DISCONNECTED state
+  Muted grey / inactive. Distinct at a glance: grey shield + open lock.
+  Original artwork; not affiliated with or endorsed by the WireGuard project.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 48 48"
+     width="48" height="48"
+     role="img"
+     aria-label="WireGuard GUI — disconnected">
+
+  <!-- shield body: dark muted grey when disconnected -->
+  <path d="M24 2
+           L44 10
+           Q45 34 24 46
+           Q3 34 4 10
+           Z"
+        fill="#2C2C2C"
+        stroke="#5A5A6A"
+        stroke-width="2"
+        stroke-linejoin="round"/>
+
+  <!-- very subtle top highlight -->
+  <path d="M24 5
+           L40 12
+           Q41 16 39 18"
+        fill="none"
+        stroke="#7A7A8A"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        opacity="0.35"/>
+
+  <!-- lock shackle OPEN — raised on the right side, indicating unlocked/disconnected -->
+  <!-- left vertical of shackle (still attached) -->
+  <line x1="17" y1="22" x2="17" y2="18"
+        stroke="#8A8A9A"
+        stroke-width="2.2"
+        stroke-linecap="round"/>
+  <!-- arc (only drawn from left post, right post is raised clear of body) -->
+  <path d="M17 18 A7 7 0 0 1 31 18"
+        fill="none"
+        stroke="#8A8A9A"
+        stroke-width="2.2"
+        stroke-linecap="round"/>
+  <!-- right vertical raised: not plugged in to lock body -->
+  <line x1="31" y1="18" x2="31" y2="14"
+        stroke="#8A8A9A"
+        stroke-width="2.2"
+        stroke-linecap="round"
+        stroke-dasharray="0"/>
+
+  <!-- lock body (darker, greyed out) -->
+  <rect x="14" y="21" width="20" height="14" rx="3" ry="3"
+        fill="#3A3A46"
+        stroke="#5A5A6A"
+        stroke-width="1.8"/>
+
+  <!-- keyhole: grey/dim -->
+  <circle cx="24" cy="27" r="2.5"
+          fill="#5A5A6A"/>
+  <rect x="22.2" y="27" width="3.6" height="5" rx="1.2"
+        fill="#5A5A6A"/>
+
+  <!-- broken / no-signal indicator bottom-right: small X -->
+  <line x1="34" y1="33" x2="40" y2="40"
+        stroke="#8A3030" stroke-width="1.8"
+        stroke-linecap="round"/>
+  <line x1="40" y1="33" x2="34" y2="40"
+        stroke="#8A3030" stroke-width="1.8"
+        stroke-linecap="round"/>
+
+</svg>

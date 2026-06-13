@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WireGuard GUI Rust — master application icon
+  Original artwork; not affiliated with or endorsed by the WireGuard project
+  or Jason A. Donenfeld. "WireGuard" is a trademark of Jason A. Donenfeld.
+
+  Design: flat shield with a network-tunnel motif (two interlocked rings /
+  a stylised data-path running through the shield), accent colour #4C9BE8
+  (steel-blue), deep-navy body. Reads clearly at 16 px.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 512 512"
+     width="512" height="512"
+     role="img"
+     aria-label="WireGuard GUI application icon">
+  <defs>
+    <!-- shield gradient: deep navy top → slightly lighter base -->
+    <linearGradient id="shieldGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#1B2A40"/>
+      <stop offset="100%" stop-color="#0F1C2E"/>
+    </linearGradient>
+    <!-- accent ring glow -->
+    <radialGradient id="glowA" cx="50%" cy="50%" r="50%">
+      <stop offset="0%"   stop-color="#7EC8FF" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#4C9BE8" stop-opacity="0"/>
+    </radialGradient>
+    <!-- clip to shield shape -->
+    <clipPath id="shieldClip">
+      <path d="M256 28
+               L464 110
+               Q472 340 256 492
+               Q40 340 48 110
+               Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- ── SHIELD BODY ─────────────────────────────────────────────── -->
+  <!-- outer stroke / border highlight -->
+  <path d="M256 28
+           L464 110
+           Q472 340 256 492
+           Q40 340 48 110
+           Z"
+        fill="url(#shieldGrad)"
+        stroke="#4C9BE8"
+        stroke-width="14"
+        stroke-linejoin="round"/>
+
+  <!-- subtle inner edge bevel -->
+  <path d="M256 60
+           L440 130
+           Q448 335 256 468
+           Q64 335 72 130
+           Z"
+        fill="none"
+        stroke="#2A4A70"
+        stroke-width="6"
+        stroke-linejoin="round"/>
+
+  <!-- ── TUNNEL / SECURE-PATH MOTIF ─────────────────────────────── -->
+  <!--
+    The motif is a stylised "network tunnel":
+      • A horizontal dashed data-pipe (the tunnel itself)
+      • Two concentric arc-rings on each end  representing entry/exit
+        portals — conveying encapsulation
+      • A small filled dot / pulse on the right side = active packet
+    Colour: electric-blue accent #4C9BE8 with brighter highlight #7EC8FF
+    The whole motif sits in the centre third of the shield.
+  -->
+
+  <!-- left entry portal: two concentric partial arcs -->
+  <circle cx="175" cy="256" r="54"
+          fill="none"
+          stroke="#4C9BE8" stroke-width="14"
+          stroke-dasharray="none"
+          opacity="0.9"/>
+  <circle cx="175" cy="256" r="34"
+          fill="none"
+          stroke="#7EC8FF" stroke-width="10"
+          opacity="0.8"/>
+  <!-- inner fill dot at left entry -->
+  <circle cx="175" cy="256" r="14"
+          fill="#7EC8FF"/>
+
+  <!-- right exit portal: two concentric arcs (slightly brighter = "exit") -->
+  <circle cx="337" cy="256" r="54"
+          fill="none"
+          stroke="#4C9BE8" stroke-width="14"
+          opacity="0.9"/>
+  <circle cx="337" cy="256" r="34"
+          fill="none"
+          stroke="#4C9BE8" stroke-width="10"
+          opacity="0.7"/>
+  <!-- inner fill dot at right exit — brighter, "arriving" -->
+  <circle cx="337" cy="256" r="14"
+          fill="#4C9BE8"/>
+
+  <!-- tunnel body: horizontal channel between the two portals -->
+  <!-- top rail -->
+  <line x1="175" y1="222" x2="337" y2="222"
+        stroke="#4C9BE8" stroke-width="10" stroke-linecap="round" opacity="0.7"/>
+  <!-- bottom rail -->
+  <line x1="175" y1="290" x2="337" y2="290"
+        stroke="#4C9BE8" stroke-width="10" stroke-linecap="round" opacity="0.7"/>
+  <!-- centre dashed data-flow line -->
+  <line x1="175" y1="256" x2="337" y2="256"
+        stroke="#7EC8FF" stroke-width="8" stroke-linecap="round"
+        stroke-dasharray="18 14"/>
+
+  <!-- lock-shackle arc at top centre — signals "secure" -->
+  <!-- shackle body (open-top arc) -->
+  <path d="M 226 200
+           A 30 30 0 0 1 286 200"
+        fill="none"
+        stroke="#7EC8FF"
+        stroke-width="12"
+        stroke-linecap="round"/>
+  <!-- lock body rectangle -->
+  <rect x="210" y="196" width="92" height="70" rx="12" ry="12"
+        fill="#1B2A40"
+        stroke="#4C9BE8" stroke-width="10"/>
+  <!-- keyhole inner circle -->
+  <circle cx="256" cy="228" r="12"
+          fill="#4C9BE8"/>
+  <!-- keyhole slot -->
+  <rect x="250" y="228" width="12" height="22" rx="4"
+        fill="#4C9BE8"/>
+
+  <!-- subtle radial glow behind motif -->
+  <circle cx="256" cy="256" r="140"
+          fill="url(#glowA)"
+          clip-path="url(#shieldClip)"/>
+
+</svg>

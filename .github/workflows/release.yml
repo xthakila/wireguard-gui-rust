@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── .deb package ────────────────────────────────────────────────────────────
+  build-deb:
+    name: Build .deb package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Build .deb package
+        run: cargo deb
+
+      - name: Locate .deb artifact
+        id: find-deb
+        run: |
+          DEB=$(find target/debian -name '*.deb' | head -1)
+          echo "path=$DEB" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$DEB")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-package
+          path: ${{ steps.find-deb.outputs.path }}
+          if-no-files-found: error
+
+  # ── AppImage ────────────────────────────────────────────────────────────────
+  build-appimage:
+    name: Build AppImage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libdbus-1-dev \
+            pkg-config \
+            fuse \
+            libfuse2
+
+      - name: Build AppImage
+        run: |
+          chmod +x packaging/appimage/build-appimage.sh
+          packaging/appimage/build-appimage.sh
+
+      - name: Locate .AppImage artifact
+        id: find-appimage
+        run: |
+          AI=$(find . -maxdepth 2 -name '*.AppImage' | head -1)
+          echo "path=$AI" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$AI")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload .AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: appimage-package
+          path: ${{ steps.find-appimage.outputs.path }}
+          if-no-files-found: error
+
+  # ── GitHub Release (attaches both artifacts) ─────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-deb, build-appimage]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download .deb artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: deb-package
+          path: dist/
+
+      - name: Download .AppImage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: appimage-package
+          path: dist/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## WireGuard GUI ${{ github.ref_name }}
+
+            Unofficial graphical interface for WireGuard® on Linux (Iced / pure Rust).
+
+            > **Note:** WireGuard is a registered trademark of Jason A. Donenfeld.
+            > This project is not affiliated with or endorsed by the WireGuard project.
+
+            ### Installation
+
+            **Debian/Ubuntu (.deb)**
+            ```
+            sudo dpkg -i wireguard-gui_*.deb
+            sudo apt-get install -f   # pull in any missing deps
+            ```
+
+            **AppImage**
+            ```
+            chmod +x WireGuard_GUI-*.AppImage
+            ./WireGuard_GUI-*.AppImage
+            ```
+
+            ### Runtime dependencies
+            `wireguard-tools` (`wg`, `wg-quick`) must be installed.
+            NetworkManager integration is used when available.
+
+# ── Snap Store publish (DISABLED — artifacts-only decision) ─────────────────
+# To enable: add a SNAP_STORE_TOKEN secret to the repository, uncomment this
+# job, and add it to the `needs` list of the release job (or run standalone).
+#
+# publish-snap:
+#   name: Publish to Snap Store
+#   runs-on: ubuntu-latest
+#   needs: [build-deb]       # or build from source directly
+#   steps:
+#     - uses: actions/checkout@v4
+#     - uses: snapcore/action-build@v1
+#       id: build-snap
+#     - uses: snapcore/action-publish@v1
+#       env:
+#         SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAP_STORE_TOKEN }}
+#       with:
+#         snap: ${{ steps.build-snap.outputs.snap }}
+#         release: stable
+
+# ── AUR publish (DISABLED — artifacts-only decision) ────────────────────────
+# To enable: add an AUR_SSH_KEY secret (the private key for your AUR account)
+# and an AUR_USERNAME secret, then uncomment this job.
+#
+# publish-aur:
+#   name: Publish to AUR
+#   runs-on: ubuntu-latest
+#   needs: [build-appimage]
+#   steps:
+#     - uses: actions/checkout@v4
+#     - name: Publish PKGBUILD to AUR
+#       uses: KSXGitHub/github-actions-deploy-aur@v2
+#       with:
+#         pkgname: wireguard-gui-rust
+#         pkgbuild: ./packaging/aur/PKGBUILD
+#         commit_username: ${{ secrets.AUR_USERNAME }}
+#         commit_email: aur@example.com
+#         ssh_private_key: ${{ secrets.AUR_SSH_KEY }}
+#         commit_message: "chore: release ${{ github.ref_name }}"

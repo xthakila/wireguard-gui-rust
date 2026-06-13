@@ -1,0 +1,95 @@
+# Maintainer: Your Name <your@email.tld>
+#
+# Unofficial WireGuard GUI — NOT affiliated with or endorsed by WireGuard® or
+# Jason A. Donenfeld. "WireGuard" is a registered trademark of Jason A. Donenfeld.
+#
+# This package installs a pre-built binary downloaded from the GitHub release
+# tarball. For a from-source build see the 'wireguard-gui-rust' AUR package.
+#
+# TODO before submitting to AUR: replace sha256sums=('SKIP' …) with real
+# checksums obtained by running:
+#   sha256sum wireguard-gui-rust-*.tar.gz wireguard-gui-rust.policy
+
+pkgname=wireguard-gui-rust-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Unofficial WireGuard GUI (pre-built binary) — manage WireGuard tunnels via a native Iced/Rust interface (not affiliated with WireGuard® or Jason A. Donenfeld)"
+arch=('x86_64')
+url="https://github.com/xthakila/wireguard-gui-rust"
+license=('MIT' 'Apache-2.0')
+depends=(
+    'wireguard-tools'   # wg + wg-quick: required to bring tunnels up/down
+    'dbus'              # system/session bus (ksni tray + IPC)
+    'polkit'            # privilege escalation for wg-quick
+)
+optdepends=(
+    'networkmanager: preferred DNS/routing backend when managing tunnels'
+    'openresolv: alternative DNS resolver integration for wg-quick'
+)
+provides=("wireguard-gui-rust=${pkgver}")
+conflicts=('wireguard-gui-rust')
+
+# Release tarball is expected to contain:
+#   wireguard-gui-rust-${pkgver}-x86_64/
+#     wireguard-gui              (compiled binary)
+#     assets/
+#       icons/hicolor/<size>/apps/wireguard-gui-rust.png
+#       icons/wireguard-gui-rust.svg
+#     wireguard-gui-rust.desktop
+#     wireguard-gui-rust.policy
+#     LICENSE-MIT
+#     LICENSE-APACHE
+#
+# Adjust _tarname / source[] if the upstream release layout differs.
+_tarname="wireguard-gui-rust-${pkgver}-x86_64"
+source=(
+    "https://github.com/xthakila/wireguard-gui-rust/releases/download/v${pkgver}/${_tarname}.tar.gz"
+)
+# TODO: replace SKIP with the real sha256 before AUR submission:
+#   sha256sum ${_tarname}.tar.gz
+sha256sums=('SKIP')
+
+prepare() {
+    # Verify the binary is present and executable-looking
+    [[ -f "${srcdir}/${_tarname}/wireguard-gui" ]] || \
+        error "Binary 'wireguard-gui' not found in release tarball — check _tarname."
+}
+
+package() {
+    local _src="${srcdir}/${_tarname}"
+
+    # ── Binary ──────────────────────────────────────────────────────────────
+    install -Dm755 "${_src}/wireguard-gui" \
+        "${pkgdir}/usr/bin/wireguard-gui"
+
+    # ── Desktop entry ───────────────────────────────────────────────────────
+    install -Dm644 "${_src}/wireguard-gui-rust.desktop" \
+        "${pkgdir}/usr/share/applications/wireguard-gui-rust.desktop"
+
+    # ── Icons (all hicolor sizes + scalable SVG) ────────────────────────────
+    local _size
+    for _size in 16x16 32x32 48x48 64x64 128x128 256x256; do
+        local _png="${_src}/assets/icons/hicolor/${_size}/apps/wireguard-gui-rust.png"
+        if [[ -f "${_png}" ]]; then
+            install -Dm644 "${_png}" \
+                "${pkgdir}/usr/share/icons/hicolor/${_size}/apps/wireguard-gui-rust.png"
+        fi
+    done
+
+    local _svg="${_src}/assets/icons/wireguard-gui-rust.svg"
+    if [[ -f "${_svg}" ]]; then
+        install -Dm644 "${_svg}" \
+            "${pkgdir}/usr/share/icons/hicolor/scalable/apps/wireguard-gui-rust.svg"
+    fi
+
+    # ── Polkit policy ───────────────────────────────────────────────────────
+    # Action ID: org.wireguardgui.rust.manage
+    install -Dm644 "${_src}/wireguard-gui-rust.policy" \
+        "${pkgdir}/usr/share/polkit-1/actions/wireguard-gui-rust.policy"
+
+    # ── Licenses ────────────────────────────────────────────────────────────
+    install -Dm644 "${_src}/LICENSE-MIT" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+    install -Dm644 "${_src}/LICENSE-APACHE" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+}

@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.1
+Type=Application
+Name=WireGuard GUI
+Comment=Manage WireGuard VPN tunnels
+# NOTE: WireGuard is a registered trademark of Jason A. Donenfeld.
+# This application is unofficial and is not endorsed by or affiliated with
+# Jason A. Donenfeld or the WireGuard project.
+Exec=wireguard-gui
+# When installed as an autostart entry (e.g. under
+# /etc/xdg/autostart/ or ~/.config/autostart/), append --hidden so the
+# window starts minimised to the system tray rather than opening on screen:
+#   Exec=wireguard-gui --hidden
+Icon=wireguard-gui-rust
+Terminal=false
+Categories=Network;Security;
+Keywords=VPN;tunnel;WireGuard;network;
+StartupNotify=false

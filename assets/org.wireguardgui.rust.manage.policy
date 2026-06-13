@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+    "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+    "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+
+<!--
+  org.wireguardgui.rust.manage.policy
+  Polkit policy for WireGuard GUI — manage WireGuard tunnels.
+
+  NOTE: WireGuard is a registered trademark of Jason A. Donenfeld.
+  This application is unofficial and is not endorsed by or affiliated with
+  Jason A. Donenfeld or the WireGuard project.
+-->
+
+<policyconfig>
+
+  <vendor>WireGuard GUI (unofficial)</vendor>
+  <vendor_url>https://github.com/xthakila/wireguard-gui-rust</vendor_url>
+
+  <action id="org.wireguardgui.rust.manage">
+
+    <description>Manage WireGuard tunnels</description>
+    <message>Authentication is required to manage WireGuard VPN tunnels.</message>
+
+    <icon_name>wireguard-gui-rust</icon_name>
+
+    <defaults>
+      <!-- Active local session: prompt once and keep the authorisation. -->
+      <allow_active>auth_admin_keep</allow_active>
+      <!-- Inactive session (e.g. remote / lock-screen): require admin auth. -->
+      <allow_inactive>auth_admin</allow_inactive>
+      <!-- No session at all: require admin auth. -->
+      <allow_any>auth_admin</allow_any>
+    </defaults>
+
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/wireguard-gui/wireguard-gui-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+
+  </action>
+
+</policyconfig>

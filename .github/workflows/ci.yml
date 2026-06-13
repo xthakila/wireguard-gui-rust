@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy (deny warnings)
+        run: cargo clippy -- -D warnings
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test

@@ -1,0 +1,119 @@
+# snapcraft.yaml — WireGuard GUI snap packaging
+#
+# Build:
+#   snapcraft          (or: snapcraft --use-lxd / --destructive-mode)
+#
+# Install (local):
+#   sudo snap install --dangerous wireguard-gui_*.snap
+#
+# -----------------------------------------------------------------------
+# POST-INSTALL — REQUIRED MANUAL CONNECTIONS
+# -----------------------------------------------------------------------
+# Two plugs are NOT auto-connected by the Snap Store because they carry
+# elevated privilege; the user (or a post-install script) must connect
+# them once after installation:
+#
+#   sudo snap connect wireguard-gui:network-manager
+#   sudo snap connect wireguard-gui:network-control
+#
+# network-manager  — lets the app read/write connections via the
+#                    NetworkManager D-Bus API (preferred path for
+#                    wg-quick profile management).
+#
+# network-control  — grants CAP_NET_ADMIN; required by wg(8) and
+#                    wg-quick(8) to bring tunnel interfaces up/down
+#                    when NetworkManager is absent or bypassed.
+#
+# Without these connections the tunnel controls will fail silently or
+# with permission errors; the GUI will still launch and display status.
+# -----------------------------------------------------------------------
+#
+# Upstream research recipe this file is derived from:
+#   https://snapcraft.io/docs/rust-plugin
+#   https://snapcraft.io/docs/gnome-extension
+#   https://snapcraft.io/docs/network-manager-interface
+#   https://snapcraft.io/docs/network-control-interface
+#   https://forum.snapcraft.io/t/wireguard-tools-in-strict-confinement
+#
+# WireGuard is a registered trademark of Jason A. Donenfeld.
+# This snap is UNOFFICIAL and is NOT endorsed by or affiliated with
+# Jason A. Donenfeld or the WireGuard project.
+# Do NOT use the official WireGuard dragon logo; use the project's
+# own icon (assets/icons/wireguard-gui-rust.svg).
+# -----------------------------------------------------------------------
+
+name: wireguard-gui
+base: core24
+adopt-info: wireguard-gui   # version/grade/title injected from the part
+
+summary: Unofficial WireGuard GUI — manage WireGuard tunnels from a desktop app
+description: |
+  WireGuard GUI is an unofficial, open-source graphical front-end for
+  WireGuard on Linux, written in pure Rust with the Iced UI toolkit.
+
+  Features:
+    - Add, remove, and switch WireGuard tunnel profiles
+    - Connect / disconnect with a single click or keyboard shortcut
+    - System-tray icon showing live connection state
+    - Reads and writes standard wg-quick .conf files
+    - Integrates with NetworkManager when available (preferred path)
+    - Falls back to wg / wg-quick for environments without NetworkManager
+
+  "WireGuard" is a registered trademark of Jason A. Donenfeld.
+  This project is UNOFFICIAL and is not affiliated with or endorsed by
+  Jason A. Donenfeld or the WireGuard project.
+
+  Source: https://github.com/xthakila/wireguard-gui-rust
+
+confinement: strict
+
+# ---------------------------------------------------------------------------
+# Application entry-point
+# ---------------------------------------------------------------------------
+apps:
+  wireguard-gui:
+    command: bin/wireguard-gui
+    extensions: [gnome]          # pulls in GTK/GNOME platform snap + Wayland/X11 env
+    plugs:
+      # --- Networking ---
+      - network                  # outbound TCP/UDP (peer handshakes, DNS lookups)
+      - network-bind             # bind sockets (local control interface)
+      - network-control          # CAP_NET_ADMIN — wg / wg-quick tunnel management
+                                 # NOT auto-connected; see post-install note above
+      - network-manager          # D-Bus access to NetworkManager for profile CRUD
+                                 # NOT auto-connected; see post-install note above
+      # --- Display ---
+      - desktop                  # D-Bus activation, icon themes, a11y
+      - desktop-legacy           # XEmbed tray, legacy input methods
+      - wayland                  # Wayland display protocol
+      - x11                      # X11 / XWayland fallback
+      - unity7                   # AppIndicator / libappindicator tray (Ubuntu)
+      # --- User data ---
+      - home                     # read/write ~/.config/wireguard-gui-rust, wg confs
+
+# ---------------------------------------------------------------------------
+# Build parts
+# ---------------------------------------------------------------------------
+parts:
+  wireguard-gui:
+    plugin: rust
+    source: .
+
+    # -- Derive version/grade from Cargo.toml via snapcraftctl --
+    override-pull: |
+      craftctl default
+      # Extract version from Cargo.toml and inject into snap metadata
+      VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\(.*\)"/\1/')"
+      craftctl set version="${VERSION}"
+      craftctl set grade=stable
+
+    build-packages:
+      - libdbus-1-dev      # D-Bus client library headers (dbus-rs build dep)
+      - pkg-config         # used by dbus-rs / other sys crates to find C libs
+      - libxkbcommon-dev   # keyboard handling (Iced / winit build dep)
+
+    stage-packages:
+      - wireguard-tools    # ships wg(8) and wg-quick(8) — runtime tunnel control
+      - iproute2           # ip(8) — required by wg-quick for route/address setup
+      - iptables           # iptables / nftables — PostUp/PostDown firewall rules
+      - libdbus-1-3        # D-Bus shared library — NetworkManager D-Bus calls
