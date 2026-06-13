@@ -4,7 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# Phase-0 spike deps (minimal). Full dep set added per-module in Phase 1.
+# GUI + tray (proven Phase-0 spike deps).
 iced = { version = "0.14.0", features = ["tokio"] }
+# IMPORTANT: keep the "blocking" feature WITHOUT default-features=false — stripping defaults
+# kills ksni's async backend and its own dbus_interface fails with ~26 type errors.
 ksni = { version = "0.3.5", features = ["blocking"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "net", "sync", "io-util"] }
+
+# Serialization (profiles, settings, status).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors.
+thiserror = "1"
+
+# Async trait objects (WgBackend).
+async-trait = "0.1"
+
+# Paths / file dialogs.
+dirs = "5"
+rfd = "0.15"
+
+# Key generation.
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+base64 = "0.22"
+rand = "0.8"
+
+# Public IP fetch (blocking HTTP, run on a blocking task).
+ureq = "2"
+
+[dev-dependencies]
+tempfile = "3"

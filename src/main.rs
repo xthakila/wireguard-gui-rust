@@ -1,3 +1,7 @@
+// Crate-wide: the Phase-1 module skeleton is full of not-yet-wired-up public items whose
+// bodies are `todo!()`; silence the resulting dead-code warnings until Phase 2 wires them in.
+#![allow(dead_code)]
+
 //! Phase-0 spike for wireguard-gui-rust.
 //!
 //! Purpose: PROVE the load-bearing Iced 0.14 + ksni 0.3.5 patterns compile and run on this
@@ -19,6 +23,17 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 mod tray;
 use tray::{spawn_tray, AppTray, TrayEvent};
+
+// Phase-1 module skeleton (the shared contract). Bodies are `todo!()`; Phase 2 wires them in.
+mod app;
+mod autostart;
+mod config;
+mod error;
+mod net;
+mod public_ip;
+mod settings;
+mod single_instance;
+mod wg;
 
 // The tray handle (for runtime icon updates) and the event receiver are created once in
 // `main` and stashed in globals so the iced `boot`/`subscription` (which take no args) can reach them.
