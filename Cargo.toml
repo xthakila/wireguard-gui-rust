@@ -47,3 +47,43 @@ ureq = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Smaller release binaries for packaging (a desktop utility; size > micro-perf).
+# LTO intentionally omitted to keep build times reasonable; add later if size matters.
+[profile.release]
+opt-level = "s"
+strip = true
+
+[package.metadata.deb]
+name = "wireguard-gui"
+maintainer = "xthakila <https://github.com/xthakila/wireguard-gui-rust>"
+copyright = "The wireguard-gui-rust contributors"
+license-file = ["LICENSE-MIT", "4"]
+extended-description = """\
+WireGuard GUI is an unofficial graphical front-end for managing WireGuard
+VPN tunnels on Linux. It lets you create, edit, and toggle tunnels without
+touching the command line.
+
+WireGuard is a registered trademark of Jason A. Donenfeld. This application
+is not endorsed by or affiliated with Jason A. Donenfeld or the WireGuard
+project.
+"""
+section = "net"
+priority = "optional"
+depends = "$auto, wireguard-tools"
+recommends = "network-manager | openresolv | resolvconf"
+assets = [
+  # both binaries: the GUI on PATH, the root helper at the polkit-declared exec path
+  ["target/release/wireguard-gui", "usr/bin/wireguard-gui", "755"],
+  ["target/release/wireguard-gui-helper", "usr/lib/wireguard-gui/wireguard-gui-helper", "755"],
+  # desktop entry + polkit action
+  ["assets/wireguard-gui-rust.desktop", "usr/share/applications/wireguard-gui-rust.desktop", "644"],
+  ["assets/org.wireguardgui.rust.manage.policy", "usr/share/polkit-1/actions/org.wireguardgui.rust.manage.policy", "644"],
+  # hicolor icons
+  ["assets/icons/hicolor/16x16/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/16x16/apps/wireguard-gui-rust.png", "644"],
+  ["assets/icons/hicolor/32x32/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/32x32/apps/wireguard-gui-rust.png", "644"],
+  ["assets/icons/hicolor/48x48/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/48x48/apps/wireguard-gui-rust.png", "644"],
+  ["assets/icons/hicolor/64x64/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/64x64/apps/wireguard-gui-rust.png", "644"],
+  ["assets/icons/hicolor/128x128/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/128x128/apps/wireguard-gui-rust.png", "644"],
+  ["assets/icons/hicolor/256x256/apps/wireguard-gui-rust.png", "usr/share/icons/hicolor/256x256/apps/wireguard-gui-rust.png", "644"],
+]
