@@ -48,9 +48,10 @@ POLKIT_ACTION="org.wireguardgui.rust.manage"
 GITHUB_REPO="xthakila/wireguard-gui-rust"
 
 # linuxdeploy release tag + asset names (pinned for reproducibility).
-LINUXDEPLOY_VERSION="1-alpha-20250213-1"
+LINUXDEPLOY_VERSION="continuous"
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/${LINUXDEPLOY_VERSION}/linuxdeploy-x86_64.AppImage"
-LINUXDEPLOY_GTK_URL="https://github.com/linuxdeploy/linuxdeploy-plugin-gtk/releases/download/continuous/linuxdeploy-plugin-gtk-x86_64.AppImage"
+# The GTK plugin is a shell script on master (it has no release assets).
+LINUXDEPLOY_GTK_URL="https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
 
 # GTK version required by the rfd file-dialog (native GTK3 picker).
 DEPLOY_GTK_VERSION=3
@@ -153,7 +154,7 @@ Exec=${APP_NAME} %u
 Icon=${DESKTOP_ID}
 Terminal=false
 Type=Application
-Categories=Network;VPN;
+Categories=Network;Security;
 Keywords=wireguard;vpn;tunnel;
 MimeType=application/x-wireguard-config;
 StartupWMClass=${APP_NAME}
@@ -179,20 +180,29 @@ ln -sf "usr/share/icons/hicolor/256x256/apps/${DESKTOP_ID}.png" "${APPDIR}/${DES
 mkdir -p "${TOOLS_DIR}"
 
 LINUXDEPLOY="${TOOLS_DIR}/linuxdeploy-x86_64.AppImage"
-LINUXDEPLOY_GTK="${TOOLS_DIR}/linuxdeploy-plugin-gtk-x86_64.AppImage"
+# Name it exactly 'linuxdeploy-plugin-gtk' so linuxdeploy's `--plugin gtk` discovers it on PATH.
+LINUXDEPLOY_GTK="${TOOLS_DIR}/linuxdeploy-plugin-gtk"
 
-if [[ ! -f "${LINUXDEPLOY}" ]]; then
+if [[ ! -s "${LINUXDEPLOY}" ]]; then   # -s: re-download if missing OR a 0-byte failed cache
     info "Downloading linuxdeploy..."
     download "${LINUXDEPLOY_URL}" "${LINUXDEPLOY}"
     chmod +x "${LINUXDEPLOY}"
 else
     info "linuxdeploy already cached at ${LINUXDEPLOY}"
 fi
+chmod +x "${LINUXDEPLOY}"   # ensure +x even when served from cache
 
-if [[ ! -f "${LINUXDEPLOY_GTK}" ]]; then
+GTK_PLUGIN_OK=1
+if [[ ! -s "${LINUXDEPLOY_GTK}" ]]; then
     info "Downloading linuxdeploy-plugin-gtk (GTK ${DEPLOY_GTK_VERSION})..."
-    download "${LINUXDEPLOY_GTK_URL}" "${LINUXDEPLOY_GTK}"
-    chmod +x "${LINUXDEPLOY_GTK}"
+    if download "${LINUXDEPLOY_GTK_URL}" "${LINUXDEPLOY_GTK}"; then
+        chmod +x "${LINUXDEPLOY_GTK}"
+    else
+        info "WARNING: could not fetch the GTK plugin — building WITHOUT bundled GTK."
+        info "         (File dialogs will use the host GTK / xdg-desktop-portal; CI bundles GTK.)"
+        rm -f "${LINUXDEPLOY_GTK}"
+        GTK_PLUGIN_OK=0
+    fi
 else
     info "linuxdeploy-plugin-gtk already cached at ${LINUXDEPLOY_GTK}"
 fi
@@ -217,14 +227,18 @@ fi
 
 info "Running linuxdeploy to assemble the AppImage..."
 
+GTK_ARGS=()
+if [[ "${GTK_PLUGIN_OK}" == "1" ]]; then GTK_ARGS=(--plugin gtk); fi
+
 DEPLOY_GTK_VERSION=${DEPLOY_GTK_VERSION} \
-OUTPUT="${OUTPUT_DIR}" \
+OUTPUT="${OUTPUT_DIR}/${DISPLAY_NAME// /_}-x86_64.AppImage" \
+PATH="${TOOLS_DIR}:${PATH}" \
     "${LINUXDEPLOY}" \
         --appdir "${APPDIR}" \
         --desktop-file "${APPDIR}/usr/share/applications/${DESKTOP_ID}.desktop" \
         --icon-file "${APPDIR}/usr/share/icons/hicolor/256x256/apps/${DESKTOP_ID}.png" \
-        --plugin gtk \
-        --custom-apprun "${APPDIR}/AppRun" \
+        "${GTK_ARGS[@]}" \
+        --custom-apprun "${SCRIPT_DIR}/AppRun" \
         --output appimage
 
 # ── Done ──────────────────────────────────────────────────────────────────────
