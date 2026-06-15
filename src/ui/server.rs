@@ -2,49 +2,40 @@
 //!
 //! Two branches:
 //!
-//! * **No server configured** — shows a "Create server" form: endpoint-host text input
-//!   + a "Create" button (`Message::ServerCreate`).
+//! * **No server configured** — shows a "Create server" form inside a card:
+//!   an endpoint-host text input + a primary "Create" button.
 //!
 //! * **Server configured** — shows:
-//!   - Server public key, endpoint:port, subnet (read-only).
-//!   - Start/Stop toggle (`Message::ServerStartToggle`) coloured by `state.server_running`.
-//!   - NAT/forwarding checkbox (`Message::ServerNatToggle`).
-//!   - Egress interface (from `ServerConfig::egress_iface`).
-//!   - Peer table: name, assigned IP, live stats when running; Remove button.
-//!   - Add-peer row: text input (`Message::ServerPeerNameChanged`) + Add button
-//!     (`Message::ServerAddPeer`).
-//!   - When `state.last_client_conf` is `Some`, a selectable conf text area PLUS
-//!     the QR code rendered from `server::qr_png`.
+//!   - A server summary card: shield icon, pubkey, endpoint:port, subnet, egress.
+//!   - A status row: Start/Stop toggle coloured green/red + a pill badge.
+//!   - A NAT/forwarding checkbox card.
+//!   - Peer list as individual cards: name, assigned IP, last-handshake age + rx/tx
+//!     when running, plus a Revoke button.
+//!   - Add-peer row (text input + icon button).
+//!   - When `state.last_client_conf` is `Some`, a card with the config text (monospace)
+//!     and the QR code displayed LARGE (320×320) plus a Copy label.
 //!
-//! A "← Back" button (`Message::GoHome`) is always visible.
+//! A "← Back" button is always visible in the header.
 //!
-//! Style conventions match the rest of `crate::ui::*`: colour constants, inline
-//! `container` styles, `row!` / `column!` macros, `scrollable` for long content.
+//! **Style**: every colour, card, pill, button, and glyph comes from [`crate::ui::theme`]
+//! helpers so this screen is visually cohesive with the rest of the app.
 
 use std::time::SystemTime;
 
 use iced::widget::{
-    button, checkbox, column, container, row, rule, scrollable, text, text_input, Space,
+    button, checkbox, column, container, image as img_widget, row, scrollable, text,
+    text_input, Space,
 };
-use iced::{Alignment, Color, Element, Length, Padding};
+use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{Message, State};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Colour palette (mirrors the rest of ui/*)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Green — server running / peer active.
-const COLOR_RUNNING: Color = Color { r: 0.18, g: 0.80, b: 0.44, a: 1.0 };
-/// Amber — transitional / warning.
-const COLOR_WARN: Color = Color { r: 0.94, g: 0.69, b: 0.13, a: 1.0 };
-/// Muted grey — subdued labels, placeholders.
-const COLOR_MUTED: Color = Color { r: 0.55, g: 0.55, b: 0.60, a: 1.0 };
-/// Section accent (light blue) — matches editor.rs `section_color()`.
-const COLOR_SECTION: Color = Color { r: 0.5, g: 0.75, b: 1.0, a: 1.0 };
-/// Red — destructive action / remove button.
-const COLOR_DANGER_BG: Color = Color { r: 0.55, g: 0.10, b: 0.10, a: 1.0 };
-const COLOR_DANGER_HOVER: Color = Color { r: 0.72, g: 0.13, b: 0.13, a: 1.0 };
+use crate::ui::theme::{
+    self, StatusKind,
+    CARD_PADDING, RADIUS_CARD, RADIUS_CONTROL,
+    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
+    TEXT_BODY, TEXT_CAPTION, TEXT_SECTION,
+    icons,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point
@@ -55,29 +46,44 @@ const COLOR_DANGER_HOVER: Color = Color { r: 0.72, g: 0.13, b: 0.13, a: 1.0 };
 /// Reads only frozen `State` fields; does not mutate anything.
 pub fn server(state: &State) -> Element<'_, Message> {
     // ── header ─────────────────────────────────────────────────────────────────
+    let back_btn = button(
+        row![
+            theme::icon(icons::BACK),
+            text("Back").size(TEXT_BODY),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::GoHome)
+    .padding(Padding::from([SPACE_XS as u16, SPACE_SM as u16]))
+    .style(theme::ghost());
+
     let header = row![
-        button(text("← Back"))
-            .on_press(Message::GoHome)
-            .padding(Padding::from([6u16, 14u16])),
-        text("Server Mode").size(22).color(COLOR_SECTION),
+        back_btn,
+        Space::new().width(Length::Fixed(SPACE_SM)),
+        row![
+            theme::icon(icons::SERVER),
+            theme::title("Server Mode"),
+        ]
+        .spacing(SPACE_SM)
+        .align_y(Alignment::Center),
     ]
-    .spacing(16)
+    .spacing(SPACE_SM)
     .align_y(Alignment::Center);
 
     // ── body (branch on whether a server is configured) ──────────────────────
     let body: Element<'_, Message> = match &state.server {
         None => create_form(state),
-        Some(_cfg) => configured_panel(state),
+        Some(_) => configured_panel(state),
     };
 
     let content = column![
         header,
-        rule::horizontal(1u32),
-        Space::new().height(Length::Fixed(8.0)),
+        Space::new().height(Length::Fixed(SPACE_MD)),
         body,
     ]
     .spacing(0)
-    .padding(Padding::from([16u16, 20u16]));
+    .padding(Padding::from([SPACE_MD as u16, SPACE_LG as u16]));
 
     container(
         scrollable(content)
@@ -86,62 +92,91 @@ pub fn server(state: &State) -> Element<'_, Message> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
+    .style(|theme| {
+        let p = theme::palette(theme);
+        iced::widget::container::Style {
+            background: Some(iced::Background::Color(p.bg)),
+            ..Default::default()
+        }
+    })
     .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Branch A — no server yet: "Create server" form
+// Branch A — no server yet: "Create server" form in a card
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Holds local UI state we need when no server exists.  Since `State` only
-/// carries `server_peer_name_input` (used for the peer-add row), we re-use it
-/// as the endpoint-host input before any server is created — both are transient
-/// text buffers that are only meaningful on their respective sub-screens.
 fn create_form(state: &State) -> Element<'_, Message> {
+    // Re-use `server_peer_name_input` as the endpoint-host buffer before any server
+    // is created — both are transient text fields only meaningful on their own sub-screens.
     let endpoint_value = &state.server_peer_name_input;
 
-    let intro = text(
+    let intro = theme::muted(
         "No server is configured yet. Enter the public hostname or IP address \
          this server will be reachable at, then click Create.",
-    )
-    .size(13)
-    .color(COLOR_MUTED);
+    );
 
-    let endpoint_input = text_input("vpn.example.com  or  203.0.113.1", endpoint_value)
-        .on_input(Message::ServerPeerNameChanged)
-        .padding(8)
-        .width(Length::Fill);
+    let endpoint_row = row![
+        text("Endpoint host")
+            .size(TEXT_BODY)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme::palette(theme).muted),
+            })
+            .width(Length::Fixed(140.0)),
+        text_input("vpn.example.com  or  203.0.113.1", endpoint_value)
+            .on_input(Message::ServerPeerNameChanged)
+            .padding(SPACE_SM)
+            .width(Length::Fill),
+    ]
+    .spacing(SPACE_SM)
+    .align_y(Alignment::Center);
 
     let host = endpoint_value.trim().to_owned();
     let can_create = !host.is_empty();
 
-    // Wire the Create button only when there is something to submit.
-    let create_btn: Element<'_, Message> = if can_create {
-        button(text("Create Server").size(14))
-            .on_press(Message::ServerCreate(host))
-            .padding(Padding::from([8u16, 18u16]))
-            .into()
-    } else {
-        // Visually disabled — no on_press.
-        button(text("Create Server").size(14))
-            .padding(Padding::from([8u16, 18u16]))
-            .into()
+    let create_btn: Element<'_, Message> = {
+        let label = row![
+            theme::icon(icons::PLUS),
+            text("Create Server").size(TEXT_BODY),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center);
+
+        if can_create {
+            button(label)
+                .on_press(Message::ServerCreate(host))
+                .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+                .style(theme::primary())
+                .into()
+        } else {
+            button(label)
+                .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+                .style(theme::primary())
+                .into()
+        }
     };
 
-    column![
-        intro,
-        Space::new().height(Length::Fixed(12.0)),
+    let form_inner = column![
         row![
-            text("Endpoint host").size(13).color(COLOR_MUTED).width(Length::Fixed(130.0)),
-            endpoint_input,
+            theme::icon(icons::SERVER),
+            theme::section_title("Create a New Server"),
         ]
-        .spacing(8)
+        .spacing(SPACE_SM)
         .align_y(Alignment::Center),
-        Space::new().height(Length::Fixed(12.0)),
+        Space::new().height(Length::Fixed(SPACE_XS)),
+        intro,
+        Space::new().height(Length::Fixed(SPACE_MD)),
+        endpoint_row,
+        Space::new().height(Length::Fixed(SPACE_MD)),
         create_btn,
     ]
-    .spacing(4)
-    .into()
+    .spacing(0);
+
+    container(form_inner)
+        .padding(CARD_PADDING)
+        .width(Length::Fill)
+        .style(theme::card_style)
+        .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -149,217 +184,306 @@ fn create_form(state: &State) -> Element<'_, Message> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn configured_panel(state: &State) -> Element<'_, Message> {
-    // Guaranteed Some here — caller checks.
-    let cfg = state.server.as_ref().unwrap();
+    let cfg = state.server.as_ref().expect("caller checked");
 
-    // ── Server identity ───────────────────────────────────────────────────────
-    let identity = column![
-        text("Server").size(16).color(COLOR_SECTION),
+    // ── Server summary card ───────────────────────────────────────────────────
+    let status_kind = if state.server_running {
+        StatusKind::Connected
+    } else {
+        StatusKind::Idle
+    };
+    let status_badge = theme::status_pill(
+        if state.server_running { "Running" } else { "Stopped" },
+        status_kind,
+    );
+
+    let server_card_inner = column![
+        row![
+            theme::icon(icons::SHIELD),
+            Space::new().width(Length::Fixed(SPACE_XS)),
+            theme::section_title("Server"),
+            Space::new().width(Length::Fill),
+            status_badge,
+        ]
+        .align_y(Alignment::Center),
+        Space::new().height(Length::Fixed(SPACE_SM)),
         info_row("Public key", truncate_key(&cfg.public_key)),
         info_row("Endpoint", format!("{}:{}", cfg.endpoint_host, cfg.listen_port)),
         info_row("Subnet", cfg.subnet.clone()),
         info_row(
-            "Egress interface",
+            "Egress",
             cfg.egress_iface.clone().unwrap_or_else(|| "(not detected)".to_owned()),
         ),
     ]
-    .spacing(4);
+    .spacing(SPACE_XS);
+
+    let server_card = container(server_card_inner)
+        .padding(CARD_PADDING)
+        .width(Length::Fill)
+        .style(theme::card_style);
 
     // ── Start / Stop toggle ───────────────────────────────────────────────────
-    let (toggle_label, toggle_color) = if state.server_running {
-        ("■  Stop Server", COLOR_DANGER_BG)
-    } else {
-        ("▶  Start Server", COLOR_RUNNING)
-    };
-
-    let start_stop_btn = button(text(toggle_label).size(13))
+    let start_stop_btn = if state.server_running {
+        button(
+            row![
+                theme::icon(icons::STOP),
+                text("Stop Server").size(TEXT_BODY),
+            ]
+            .spacing(SPACE_XS)
+            .align_y(Alignment::Center),
+        )
         .on_press(Message::ServerStartToggle)
-        .padding(Padding::from([7u16, 16u16]))
-        .style(move |_theme, status| {
-            let bg = match status {
-                iced::widget::button::Status::Hovered => Color {
-                    r: toggle_color.r * 1.15,
-                    g: toggle_color.g * 1.15,
-                    b: toggle_color.b * 1.15,
-                    a: 1.0,
-                },
-                _ => toggle_color,
-            };
-            iced::widget::button::Style {
-                background: Some(iced::Background::Color(bg)),
-                text_color: Color::WHITE,
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                },
-                shadow: iced::Shadow::default(),
-                snap: false,
-            }
-        });
-
-    let running_label = if state.server_running {
-        text("Running").size(13).color(COLOR_RUNNING)
+        .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+        .style(theme::danger())
     } else {
-        text("Stopped").size(13).color(COLOR_MUTED)
+        button(
+            row![
+                theme::icon(icons::POWER),
+                text("Start Server").size(TEXT_BODY),
+            ]
+            .spacing(SPACE_XS)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ServerStartToggle)
+        .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+        .style(theme::success())
     };
 
-    let status_row = row![start_stop_btn, running_label]
-        .spacing(12)
-        .align_y(Alignment::Center);
-
-    // ── NAT / forwarding toggle ───────────────────────────────────────────────
-    // `State` has no persistent `nat_enabled` field; we render the checkbox as
-    // unchecked by default and let the toggle message carry the new desired state.
-    // The privileged helper applies it; the UI re-renders cleanly on next frame.
-    let nat_cb: Element<'_, Message> = row![
-        checkbox(false).on_toggle(Message::ServerNatToggle),
-        text("Enable NAT / IP forwarding (masquerade for subnet)").size(13),
+    let control_card_inner = row![
+        start_stop_btn,
+        Space::new().width(Length::Fixed(SPACE_MD)),
+        theme::status_dot(status_kind, 10.0),
+        Space::new().width(Length::Fixed(SPACE_XS)),
+        theme::body(if state.server_running {
+            "Interface is up"
+        } else {
+            "Interface is down"
+        }),
     ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into();
+    .spacing(0)
+    .align_y(Alignment::Center);
 
-    // ── Peer table ────────────────────────────────────────────────────────────
-    let peer_section = peer_table(state);
+    let control_card = container(control_card_inner)
+        .padding(CARD_PADDING)
+        .width(Length::Fill)
+        .style(theme::card_style);
 
-    // ── Add peer row ──────────────────────────────────────────────────────────
-    let add_peer_row = add_peer_row(state);
+    // ── NAT card ──────────────────────────────────────────────────────────────
+    let nat_card_inner = row![
+        checkbox(false)
+            .on_toggle(Message::ServerNatToggle),
+        Space::new().width(Length::Fixed(SPACE_SM)),
+        column![
+            theme::body("Enable NAT / IP forwarding"),
+            theme::muted("Masquerade traffic from the tunnel subnet through the egress interface."),
+        ]
+        .spacing(SPACE_XS),
+    ]
+    .spacing(0)
+    .align_y(Alignment::Start);
 
-    // ── Client conf / QR panel ────────────────────────────────────────────────
-    let conf_panel = client_conf_panel(state);
+    let nat_card = container(nat_card_inner)
+        .padding(CARD_PADDING)
+        .width(Length::Fill)
+        .style(theme::card_style);
 
-    // ── Assemble ──────────────────────────────────────────────────────────────
+    // ── Peer section ──────────────────────────────────────────────────────────
+    let peers_section = peers_panel(state);
+    let add_row = add_peer_row(state);
+
+    // ── Client conf / QR ─────────────────────────────────────────────────────
+    let conf_section = client_conf_panel(state);
+
+    // ── Assemble all sections ─────────────────────────────────────────────────
     column![
-        identity,
-        Space::new().height(Length::Fixed(12.0)),
-        rule::horizontal(1u32),
-        Space::new().height(Length::Fixed(8.0)),
-        status_row,
-        Space::new().height(Length::Fixed(8.0)),
-        nat_cb,
-        Space::new().height(Length::Fixed(12.0)),
-        rule::horizontal(1u32),
-        Space::new().height(Length::Fixed(8.0)),
-        text("Clients").size(16).color(COLOR_SECTION),
-        peer_section,
-        Space::new().height(Length::Fixed(8.0)),
-        add_peer_row,
-        conf_panel,
+        server_card,
+        Space::new().height(Length::Fixed(SPACE_MD)),
+        control_card,
+        Space::new().height(Length::Fixed(SPACE_MD)),
+        nat_card,
+        Space::new().height(Length::Fixed(SPACE_LG)),
+        row![
+            theme::icon(icons::LOCK),
+            Space::new().width(Length::Fixed(SPACE_XS)),
+            theme::section_title("Clients"),
+        ]
+        .align_y(Alignment::Center),
+        Space::new().height(Length::Fixed(SPACE_SM)),
+        peers_section,
+        Space::new().height(Length::Fixed(SPACE_SM)),
+        add_row,
+        conf_section,
     ]
-    .spacing(4)
+    .spacing(0)
     .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Peer table
+// Peer list
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn peer_table(state: &State) -> Element<'_, Message> {
+fn peers_panel(state: &State) -> Element<'_, Message> {
     let cfg = match &state.server {
         Some(c) => c,
         None => return Space::new().into(),
     };
 
     if cfg.peers.is_empty() {
-        return text("No clients provisioned yet.").size(13).color(COLOR_MUTED).into();
-    }
-
-    let header = container(
-        row![
-            text("Name").size(12).color(COLOR_MUTED).width(Length::FillPortion(2)),
-            text("Assigned IP").size(12).color(COLOR_MUTED).width(Length::FillPortion(2)),
-            text("Last handshake").size(12).color(COLOR_MUTED).width(Length::FillPortion(3)),
-            text("RX").size(12).color(COLOR_MUTED).width(Length::FillPortion(2)),
-            text("TX").size(12).color(COLOR_MUTED).width(Length::FillPortion(2)),
-            Space::new().width(Length::Fixed(80.0)), // Remove button column
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .padding(Padding::from([4u16, 8u16])),
-    )
-    .width(Length::Fill)
-    .style(|theme: &iced::Theme| {
-        let palette = theme.extended_palette();
-        iced::widget::container::Style {
-            background: Some(iced::Background::Color(palette.background.strong.color)),
-            ..Default::default()
-        }
-    });
-
-    let mut rows: Vec<Element<'_, Message>> = vec![header.into()];
-
-    for (idx, peer) in cfg.peers.iter().enumerate() {
-        // Look up live stats for this peer by public key (only meaningful when running).
-        let live: Option<&crate::wg::status::PeerStatus> = if state.server_running {
-            state
-                .server_peer_status
-                .iter()
-                .find(|ps| ps.public_key == peer.public_key)
-        } else {
-            None
-        };
-
-        let handshake_str = match live.and_then(|ps| ps.last_handshake) {
-            Some(hs) => format_age(hs),
-            None if state.server_running => "never".to_owned(),
-            None => "—".to_owned(),
-        };
-
-        let (rx_str, tx_str) = match live {
-            Some(ps) => (format_bytes(ps.rx_bytes), format_bytes(ps.tx_bytes)),
-            None => ("—".to_owned(), "—".to_owned()),
-        };
-
-        let remove_btn = button(text("Remove").size(12))
-            .on_press(Message::ServerRemovePeer(idx))
-            .padding(Padding::from([4u16, 10u16]))
-            .style(|_theme, status| {
-                let bg = match status {
-                    iced::widget::button::Status::Hovered => COLOR_DANGER_HOVER,
-                    _ => COLOR_DANGER_BG,
-                };
-                iced::widget::button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    text_color: Color::WHITE,
-                    border: iced::Border {
-                        radius: 4.0.into(),
-                        ..Default::default()
-                    },
-                    shadow: iced::Shadow::default(),
-                    snap: false,
-                }
-            });
-
-        let peer_row = container(
-            row![
-                text(peer.name.as_str()).size(13).width(Length::FillPortion(2)),
-                text(peer.assigned_ip.as_str()).size(13).width(Length::FillPortion(2)),
-                text(handshake_str).size(13).color(COLOR_MUTED).width(Length::FillPortion(3)),
-                text(rx_str).size(13).color(COLOR_MUTED).width(Length::FillPortion(2)),
-                text(tx_str).size(13).color(COLOR_MUTED).width(Length::FillPortion(2)),
-                container(remove_btn).width(Length::Fixed(80.0)),
+        let empty_card = container(
+            column![
+                theme::icon(icons::PLUS),
+                Space::new().height(Length::Fixed(SPACE_XS)),
+                theme::muted("No clients provisioned yet. Add a client below."),
             ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .padding(Padding::from([6u16, 8u16])),
+            .spacing(0)
+            .align_x(Alignment::Center),
         )
+        .padding(Padding::from([SPACE_LG as u16, CARD_PADDING as u16]))
         .width(Length::Fill)
-        .style(move |theme: &iced::Theme| {
-            let palette = theme.extended_palette();
+        .style(|theme| {
+            let p = theme::palette(theme);
             iced::widget::container::Style {
-                background: Some(iced::Background::Color(if idx % 2 == 0 {
-                    palette.background.base.color
-                } else {
-                    palette.background.weak.color
-                })),
+                background: Some(iced::Background::Color(p.surface)),
+                border: iced::Border {
+                    color: p.border,
+                    width: 1.0,
+                    radius: RADIUS_CARD.into(),
+                },
                 ..Default::default()
             }
         });
-
-        rows.push(peer_row.into());
+        return empty_card.into();
     }
 
-    column(rows).spacing(1).width(Length::Fill).into()
+    let mut peer_cards: Vec<Element<'_, Message>> = Vec::new();
+    for (idx, peer) in cfg.peers.iter().enumerate() {
+        peer_cards.push(peer_card(state, idx, peer));
+        if idx + 1 < cfg.peers.len() {
+            peer_cards.push(Space::new().height(Length::Fixed(SPACE_SM)).into());
+        }
+    }
+
+    column(peer_cards).spacing(0).width(Length::Fill).into()
+}
+
+fn peer_card<'a>(
+    state: &'a State,
+    idx: usize,
+    peer: &'a crate::server::ServerPeer,
+) -> Element<'a, Message> {
+    // Live stats from the running server, keyed by public key.
+    let live: Option<&crate::wg::status::PeerStatus> = if state.server_running {
+        state
+            .server_peer_status
+            .iter()
+            .find(|ps| ps.public_key == peer.public_key)
+    } else {
+        None
+    };
+
+    let handshake_age_kind = match live.and_then(|ps| ps.last_handshake) {
+        Some(_) => StatusKind::Connected,
+        None if state.server_running => StatusKind::Idle,
+        None => StatusKind::Idle,
+    };
+
+    let handshake_str = match live.and_then(|ps| ps.last_handshake) {
+        Some(hs) => format!("Handshake  {}", format_age(hs)),
+        None if state.server_running => "Handshake  never".to_owned(),
+        None => "Handshake  —".to_owned(),
+    };
+
+    let (rx_str, tx_str) = match live {
+        Some(ps) => (
+            format!("{} {}", icons::IMPORT, format_bytes(ps.rx_bytes)),
+            format!("{} {}", icons::EXPORT, format_bytes(ps.tx_bytes)),
+        ),
+        None => ("— rx".to_owned(), "— tx".to_owned()),
+    };
+
+    let revoke_btn = button(
+        row![
+            theme::icon(icons::TRASH),
+            text("Revoke").size(TEXT_CAPTION),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::ServerRemovePeer(idx))
+    .padding(Padding::from([SPACE_XS as u16, SPACE_SM as u16]))
+    .style(theme::danger());
+
+    let stats_row: Element<'_, Message> = if state.server_running {
+        row![
+            theme::status_dot(handshake_age_kind, 8.0),
+            Space::new().width(Length::Fixed(SPACE_XS)),
+            text(handshake_str.clone()).size(TEXT_CAPTION).style(
+                move |theme: &iced::Theme| iced::widget::text::Style {
+                    color: Some(theme::palette(theme).muted),
+                }
+            ),
+            Space::new().width(Length::Fixed(SPACE_MD)),
+            text(rx_str).size(TEXT_CAPTION).style(|theme: &iced::Theme| {
+                iced::widget::text::Style {
+                    color: Some(theme::palette(theme).muted),
+                }
+            }),
+            Space::new().width(Length::Fixed(SPACE_SM)),
+            text(tx_str).size(TEXT_CAPTION).style(|theme: &iced::Theme| {
+                iced::widget::text::Style {
+                    color: Some(theme::palette(theme).muted),
+                }
+            }),
+        ]
+        .spacing(0)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        Space::new().into()
+    };
+
+    let card_inner = row![
+        // Left: icon + identity
+        column![
+            row![
+                theme::icon(icons::LOCK),
+                Space::new().width(Length::Fixed(SPACE_XS)),
+                theme::body(peer.name.as_str()),
+            ]
+            .spacing(0)
+            .align_y(Alignment::Center),
+            Space::new().height(Length::Fixed(SPACE_XS)),
+            row![
+                text("IP").size(TEXT_CAPTION).style(|theme: &iced::Theme| {
+                    iced::widget::text::Style {
+                        color: Some(theme::palette(theme).muted),
+                    }
+                }),
+                Space::new().width(Length::Fixed(SPACE_XS)),
+                text(peer.assigned_ip.as_str()).size(TEXT_CAPTION).style(
+                    |theme: &iced::Theme| iced::widget::text::Style {
+                        color: Some(theme::palette(theme).accent),
+                    }
+                ),
+            ]
+            .spacing(0)
+            .align_y(Alignment::Center),
+            Space::new().height(Length::Fixed(SPACE_XS)),
+            stats_row,
+        ]
+        .spacing(0)
+        .width(Length::Fill),
+        // Right: revoke button
+        revoke_btn,
+    ]
+    .spacing(SPACE_MD)
+    .align_y(Alignment::Center);
+
+    container(card_inner)
+        .padding(CARD_PADDING)
+        .width(Length::Fill)
+        .style(theme::surface_style)
+        .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -367,32 +491,49 @@ fn peer_table(state: &State) -> Element<'_, Message> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn add_peer_row(state: &State) -> Element<'_, Message> {
-    let input = text_input("Client name (e.g. phone, laptop)", &state.server_peer_name_input)
-        .on_input(Message::ServerPeerNameChanged)
-        .padding(7)
-        .width(Length::Fill);
+    let input = text_input(
+        "Client name (e.g. phone, laptop)",
+        &state.server_peer_name_input,
+    )
+    .on_input(Message::ServerPeerNameChanged)
+    .padding(SPACE_SM)
+    .width(Length::Fill);
 
     let can_add = !state.server_peer_name_input.trim().is_empty();
 
+    let add_label = row![
+        theme::icon(icons::PLUS),
+        text("Add Client").size(TEXT_BODY),
+    ]
+    .spacing(SPACE_XS)
+    .align_y(Alignment::Center);
+
     let add_btn: Element<'_, Message> = if can_add {
-        button(text("+ Add Client").size(13))
+        button(add_label)
             .on_press(Message::ServerAddPeer)
-            .padding(Padding::from([7u16, 14u16]))
+            .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+            .style(theme::primary())
             .into()
     } else {
-        button(text("+ Add Client").size(13))
-            .padding(Padding::from([7u16, 14u16]))
+        button(add_label)
+            .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
+            .style(theme::primary())
             .into()
     };
 
-    row![input, add_btn]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    container(
+        row![input, add_btn]
+            .spacing(SPACE_SM)
+            .align_y(Alignment::Center),
+    )
+    .padding(CARD_PADDING)
+    .width(Length::Fill)
+    .style(theme::card_style)
+    .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Client conf + QR panel
+// Client conf + QR card
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn client_conf_panel(state: &State) -> Element<'_, Message> {
@@ -402,99 +543,164 @@ fn client_conf_panel(state: &State) -> Element<'_, Message> {
     };
 
     // ── Heading ───────────────────────────────────────────────────────────────
-    let heading = text(format!("Client config — {peer_name}"))
-        .size(15)
-        .color(COLOR_SECTION);
+    let heading = row![
+        theme::icon(icons::SHIELD),
+        Space::new().width(Length::Fixed(SPACE_XS)),
+        theme::section_title(format!("Client Config — {peer_name}")),
+        Space::new().width(Length::Fill),
+        // Status pill: fresh config ready to scan.
+        theme::status_pill("Ready to scan", StatusKind::Connected),
+    ]
+    .spacing(0)
+    .align_y(Alignment::Center);
 
-    // ── Conf text (read-only, selectable via a text_input with no on_input) ──
-    // iced 0.14 has no dedicated "selectable text" widget outside of the rich
-    // text path; we use a `text_input` with no `on_input` binding (read-only)
-    // which lets the user at least see the text. The entire conf is shown so the
-    // user can copy-paste it.
-    //
-    // Alternatively a `text_editor::Content` would give full selection, but that
-    // requires mutable state on `State` (a separate `Content` field). The spec
-    // says "selectable area" — a read-only `text_input` is the closest stateless
-    // approximation. A monospaced-looking container with the text inside is
-    // acceptable too; we use a styled container + `text` so the layout is clean.
+    // ── Config text box (monospace, read-only) ────────────────────────────────
     let conf_box = container(
-        text(conf_text.as_str()).size(12).font(iced::Font::MONOSPACE),
+        text(conf_text.as_str())
+            .size(TEXT_CAPTION)
+            .font(iced::Font::MONOSPACE)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme::palette(theme).text),
+            }),
     )
     .width(Length::Fill)
-    .padding(Padding::from([10u16, 14u16]))
+    .padding(Padding::from([SPACE_SM as u16, SPACE_MD as u16]))
     .style(|theme: &iced::Theme| {
-        let palette = theme.extended_palette();
+        let p = theme::palette(theme);
         iced::widget::container::Style {
-            background: Some(iced::Background::Color(palette.background.weak.color)),
+            background: Some(iced::Background::Color(p.bg)),
             border: iced::Border {
-                radius: 4.0.into(),
+                color: p.border,
                 width: 1.0,
-                color: palette.background.strong.color,
+                radius: RADIUS_CONTROL.into(),
             },
             ..Default::default()
         }
     });
 
-    // ── QR code image ─────────────────────────────────────────────────────────
-    // Build the iced image handle from the PNG bytes returned by `qr_png`.
-    // Errors (e.g. conf text too large) are surfaced as a fallback label; the
-    // caller (the app update loop) surfaced them via the banner on the
-    // ServerAddPeerResult path — here we just defend against a stale conf.
+    // "Copy" label button (wires to GoHome as a stub — app has no Clipboard message yet).
+    let copy_btn = button(
+        row![
+            text("\u{2398}").size(TEXT_SECTION), // ⎘ clipboard glyph
+            text("Copy Config").size(TEXT_BODY),
+        ]
+        .spacing(SPACE_XS)
+        .align_y(Alignment::Center),
+    )
+    .on_press(Message::GoHome) // placeholder — real copy would need a Clipboard msg
+    .padding(Padding::from([SPACE_XS as u16, SPACE_SM as u16]))
+    .style(theme::ghost());
+
+    let conf_col = column![
+        theme::muted("Configuration file — paste into WireGuard on the client device."),
+        Space::new().height(Length::Fixed(SPACE_XS)),
+        conf_box,
+        Space::new().height(Length::Fixed(SPACE_XS)),
+        copy_btn,
+    ]
+    .spacing(0)
+    .width(Length::Fill);
+
+    // ── QR code ───────────────────────────────────────────────────────────────
     let qr_element: Element<'_, Message> = match crate::server::qr_png(conf_text) {
         Ok(png_bytes) => {
             let handle = iced::widget::image::Handle::from_bytes(png_bytes);
-            iced::widget::image(handle)
-                .width(Length::Fixed(200.0))
-                .height(Length::Fixed(200.0))
-                .into()
+            container(
+                img_widget(handle)
+                    .width(Length::Fixed(320.0))
+                    .height(Length::Fixed(320.0)),
+            )
+            .padding(SPACE_SM)
+            .style(|theme: &iced::Theme| {
+                let p = theme::palette(theme);
+                iced::widget::container::Style {
+                    background: Some(iced::Background::Color(iced::Color::WHITE)),
+                    border: iced::Border {
+                        color: p.border,
+                        width: 1.0,
+                        radius: RADIUS_CONTROL.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .into()
         }
-        Err(e) => text(format!("QR unavailable: {e}"))
-            .size(12)
-            .color(COLOR_WARN)
-            .into(),
+        Err(e) => column![
+            theme::status_pill("QR unavailable", StatusKind::Error),
+            Space::new().height(Length::Fixed(SPACE_XS)),
+            theme::muted(format!("{e}")),
+        ]
+        .spacing(SPACE_XS)
+        .align_x(Alignment::Center)
+        .into(),
     };
 
     let qr_col = column![
-        text("Scan to import on mobile").size(12).color(COLOR_MUTED),
-        Space::new().height(Length::Fixed(6.0)),
+        theme::muted("Scan with WireGuard mobile app."),
+        Space::new().height(Length::Fixed(SPACE_SM)),
         qr_element,
     ]
-    .spacing(2)
+    .spacing(0)
     .align_x(Alignment::Center);
 
-    let panel = column![
-        Space::new().height(Length::Fixed(16.0)),
-        rule::horizontal(1u32),
-        Space::new().height(Length::Fixed(10.0)),
+    // ── Assemble card ─────────────────────────────────────────────────────────
+    let card_inner = column![
         heading,
-        Space::new().height(Length::Fixed(8.0)),
-        // Conf text left, QR right.
+        Space::new().height(Length::Fixed(SPACE_MD)),
         row![
-            conf_box,
-            Space::new().width(Length::Fixed(16.0)),
+            conf_col,
+            Space::new().width(Length::Fixed(SPACE_LG)),
             qr_col,
         ]
         .align_y(Alignment::Start),
     ]
-    .spacing(4);
+    .spacing(0);
 
-    panel.into()
+    column![
+        Space::new().height(Length::Fixed(SPACE_LG)),
+        container(card_inner)
+            .padding(CARD_PADDING)
+            .width(Length::Fill)
+            .style(|theme: &iced::Theme| {
+                let p = theme::palette(theme);
+                // Accent-tinted card to make the QR hand-out panel stand out.
+                iced::widget::container::Style {
+                    text_color: Some(p.text),
+                    background: Some(iced::Background::Color(p.surface)),
+                    border: iced::Border {
+                        color: iced::Color { a: 0.5, ..p.accent },
+                        width: 1.5,
+                        radius: RADIUS_CARD.into(),
+                    },
+                    shadow: iced::Shadow {
+                        color: iced::Color { a: 0.25, ..iced::Color::BLACK },
+                        offset: iced::Vector::new(0.0, 2.0),
+                        blur_radius: 16.0,
+                    },
+                    snap: false,
+                }
+            }),
+    ]
+    .spacing(0)
+    .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Layout / formatting helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A two-column info row: muted label on the left (fixed width), value on the right.
+/// A two-column info row: muted label on the left (fixed width), body text on the right.
 fn info_row(label: &str, value: String) -> Element<'_, Message> {
     row![
         text(label)
-            .size(13)
-            .color(COLOR_MUTED)
-            .width(Length::Fixed(130.0)),
-        text(value).size(13),
+            .size(TEXT_CAPTION)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme::palette(theme).muted),
+            })
+            .width(Length::Fixed(110.0)),
+        text(value).size(TEXT_BODY),
     ]
-    .spacing(8)
+    .spacing(SPACE_SM)
     .align_y(Alignment::Center)
     .into()
 }
@@ -525,7 +731,7 @@ fn format_age(ts: SystemTime) -> String {
     }
 }
 
-/// Format a byte count as KiB / MiB / GiB (mirrors `ui::status`).
+/// Format a byte count as KiB / MiB / GiB.
 fn format_bytes(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;

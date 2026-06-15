@@ -95,6 +95,11 @@ fn update_tray_icon(connected: bool) {
 /// would re-trigger pkexec), so a single connect-time arm is the default behaviour.
 const KILL_SWITCH_LEASE_SECS: u64 = 3600;
 
+/// How many `(rx, tx)` throughput samples the dashboard sparkline retains. One
+/// sample per status tick; sized to cover a useful recent window without
+/// growing unbounded.
+pub(crate) const THROUGHPUT_HISTORY_LEN: usize = 60;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Domain enums / structs (FROZEN — views depend on these shapes)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -250,6 +255,18 @@ pub struct State {
     /// `(peer_name, conf_text)`. Drives the QR / copy panel. `None` when nothing is
     /// pending display.
     pub(crate) last_client_conf: Option<(String, String)>,
+
+    // ── DASHBOARD presentation state (read by the status screen) ──────────────
+    /// When the current tunnel last became Connected. Set when a connect
+    /// succeeds, cleared on disconnect / error. Drives the "connected for …"
+    /// uptime readout. The `update()` reducer owns set/clear (wired in the
+    /// integrate stage); construction leaves it `None`.
+    pub(crate) connected_since: Option<std::time::Instant>,
+    /// Rolling history of cumulative `(rx_bytes, tx_bytes)` samples (most recent
+    /// last), capped at [`THROUGHPUT_HISTORY_LEN`]. Feeds the throughput
+    /// sparkline. Push new samples with [`State::push_throughput_sample`]; the
+    /// reducer calls it on each status tick (wired in the integrate stage).
+    pub(crate) throughput_history: std::collections::VecDeque<(u64, u64)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -425,6 +442,10 @@ impl State {
             server_peer_status: Vec::new(),
             server_peer_name_input: String::new(),
             last_client_conf: None,
+            connected_since: None,
+            throughput_history: std::collections::VecDeque::with_capacity(
+                THROUGHPUT_HISTORY_LEN,
+            ),
         };
 
         // Load all profiles (list names → read each) and settings concurrently.
@@ -437,6 +458,20 @@ impl State {
     /// Read-only accessor for the start-hidden flag (used by `main` window setup).
     pub fn start_hidden(&self) -> bool {
         self.start_hidden
+    }
+
+    /// Record a cumulative `(rx_bytes, tx_bytes)` throughput sample for the
+    /// dashboard sparkline, evicting the oldest once the history exceeds
+    /// [`THROUGHPUT_HISTORY_LEN`].
+    ///
+    /// Pure state mutation — no side effects. The reducer calls this from the
+    /// status-tick handler (wired in the integrate stage); it is exercised
+    /// directly by unit tests here.
+    pub(crate) fn push_throughput_sample(&mut self, rx: u64, tx: u64) {
+        self.throughput_history.push_back((rx, tx));
+        while self.throughput_history.len() > THROUGHPUT_HISTORY_LEN {
+            self.throughput_history.pop_front();
+        }
     }
 }
 
@@ -576,6 +611,11 @@ impl State {
                         self.tunnel_status = TunnelStatus::Connected(name.clone());
                         update_tray_icon(true);
                         self.reconnect_attempt = 0;
+                        // Mark when the tunnel came up so the dashboard can show the
+                        // "connected for …" uptime, and clear any stale throughput
+                        // history so the sparkline starts fresh for this session.
+                        self.connected_since = Some(std::time::Instant::now());
+                        self.throughput_history.clear();
                         self.set_banner(BannerKind::Success, format!("Connected to {name}"));
 
                         // Kill-switch: when enabled, arm it now that the tunnel is up.
@@ -594,6 +634,9 @@ impl State {
                     Err(e) => {
                         self.tunnel_status = TunnelStatus::Error(e.to_string());
                         update_tray_icon(false);
+                        // Connect failed — there is no live tunnel, so clear the
+                        // uptime origin (it was never set, but stay defensive).
+                        self.connected_since = None;
                         self.set_banner(BannerKind::Error, format!("Connect failed: {e}"));
                     }
                 }
@@ -606,6 +649,10 @@ impl State {
                         self.tunnel_status = TunnelStatus::Disconnected;
                         self.live_status = None;
                         update_tray_icon(false);
+                        // Tunnel is down: clear the uptime origin and throughput
+                        // history so the dashboard stops showing a live session.
+                        self.connected_since = None;
+                        self.throughput_history.clear();
                         self.set_banner(BannerKind::Info, "Disconnected".to_owned());
 
                         // Kill-switch: tear it down so traffic is restored after a
@@ -900,7 +947,19 @@ impl State {
             }
             Message::StatusFetched(result) => {
                 match result {
-                    Ok(status) => self.live_status = status,
+                    Ok(status) => {
+                        // Feed the dashboard sparkline: push one cumulative
+                        // (rx, tx) sample per tick, summed across the interface's
+                        // peers. Only while a live status exists (a down tunnel
+                        // returns None and contributes no sample).
+                        if let Some(s) = status.as_ref() {
+                            let (rx, tx) = s.peers.iter().fold((0u64, 0u64), |(rx, tx), p| {
+                                (rx.saturating_add(p.rx_bytes), tx.saturating_add(p.tx_bytes))
+                            });
+                            self.push_throughput_sample(rx, tx);
+                        }
+                        self.live_status = status;
+                    }
                     Err(e) => {
                         // Status errors are noisy on a down tunnel; surface only via the banner
                         // when nothing is connected wouldn't be useful, so only warn on hard errors.
@@ -1718,44 +1777,13 @@ impl State {
 
     /// Resolve the active iced [`Theme`] from the user's preference.
     ///
-    /// `FollowSystem` maps to `Dark` for now (no system-theme detector is wired yet — iced
-    /// 0.14 exposes no stable light/dark query, so we do NOT invent one).
+    /// Delegates to [`crate::ui::theme::app_theme`] — the single decision point
+    /// for the app's theme — so the shared screen helpers (cards, pills, button
+    /// styles) and the active theme always agree. The custom dark/light variants
+    /// carry the blue shield accent; `Named(..)` passes through to a built-in
+    /// iced theme.
     pub fn theme(&self) -> Theme {
-        match &self.settings.theme {
-            ThemePreference::Light => Theme::Light,
-            ThemePreference::Dark => Theme::Dark,
-            ThemePreference::FollowSystem => Theme::Dark,
-            ThemePreference::Named(name) => named_theme(name),
-        }
-    }
-}
-
-/// Map a named-theme string to an iced built-in theme, defaulting to `Dark`.
-fn named_theme(name: &str) -> Theme {
-    match name {
-        "Light" => Theme::Light,
-        "Dark" => Theme::Dark,
-        "Dracula" => Theme::Dracula,
-        "Nord" => Theme::Nord,
-        "SolarizedLight" => Theme::SolarizedLight,
-        "SolarizedDark" => Theme::SolarizedDark,
-        "GruvboxLight" => Theme::GruvboxLight,
-        "GruvboxDark" => Theme::GruvboxDark,
-        "CatppuccinLatte" => Theme::CatppuccinLatte,
-        "CatppuccinFrappe" => Theme::CatppuccinFrappe,
-        "CatppuccinMacchiato" => Theme::CatppuccinMacchiato,
-        "CatppuccinMocha" => Theme::CatppuccinMocha,
-        "TokyoNight" => Theme::TokyoNight,
-        "TokyoNightStorm" => Theme::TokyoNightStorm,
-        "TokyoNightLight" => Theme::TokyoNightLight,
-        "KanagawaWave" => Theme::KanagawaWave,
-        "KanagawaDragon" => Theme::KanagawaDragon,
-        "KanagawaLotus" => Theme::KanagawaLotus,
-        "Moonfly" => Theme::Moonfly,
-        "Nightfly" => Theme::Nightfly,
-        "Oxocarbon" => Theme::Oxocarbon,
-        "Ferra" => Theme::Ferra,
-        _ => Theme::Dark,
+        crate::ui::theme::app_theme(&self.settings)
     }
 }
 
@@ -1922,5 +1950,37 @@ mod tests {
             assert!(KILL_SWITCH_LEASE_SECS >= 60);
             assert!(KILL_SWITCH_LEASE_SECS <= 86_400);
         }
+    }
+
+    // ── dashboard state additions ─────────────────────────────────────────────
+
+    #[test]
+    fn new_state_inits_dashboard_fields_empty() {
+        let (state, _task) = State::new();
+        assert!(state.connected_since.is_none());
+        assert!(state.throughput_history.is_empty());
+    }
+
+    #[test]
+    fn push_throughput_sample_appends_in_order() {
+        let (mut state, _task) = State::new();
+        state.push_throughput_sample(10, 20);
+        state.push_throughput_sample(30, 40);
+        let samples: Vec<_> = state.throughput_history.iter().copied().collect();
+        assert_eq!(samples, vec![(10, 20), (30, 40)]);
+    }
+
+    #[test]
+    fn push_throughput_sample_caps_history_evicting_oldest() {
+        let (mut state, _task) = State::new();
+        // Push one more than the cap; the oldest must be evicted.
+        for i in 0..(THROUGHPUT_HISTORY_LEN as u64 + 5) {
+            state.push_throughput_sample(i, i * 2);
+        }
+        assert_eq!(state.throughput_history.len(), THROUGHPUT_HISTORY_LEN);
+        // Front is the (5)th sample (0..=4 evicted); back is the last pushed.
+        assert_eq!(state.throughput_history.front().copied(), Some((5, 10)));
+        let last = THROUGHPUT_HISTORY_LEN as u64 + 4;
+        assert_eq!(state.throughput_history.back().copied(), Some((last, last * 2)));
     }
 }

@@ -85,7 +85,8 @@ Needs a recent stable Rust toolchain and the usual desktop build libs (`libxkbco
 | Crate part | Role |
 |---|---|
 | `src/app.rs` | The Iced application: a single `State` + `Message` reducer (Elm-style) |
-| `src/ui/*` | Per-screen views (status, profile list, editor, plan, settings) |
+| `src/ui/*` | Per-screen views (status, profile list, editor, plan, settings, server) |
+| `src/ui/theme.rs` | Shared visual language: blue-accent dark/light palette, 8px spacing rhythm, card/pill/button/icon helpers every screen reuses |
 | `src/config/*` | `.conf` parser/validator, profile store, pure-Rust x25519 keygen |
 | `src/wg/*` | `wg show` status parsing, dry-run Plan, `nmcli` + `wg-quick` backends |
 | `src/net/*` | kill-switch (nftables), per-app netns, auto-reconnect watchdog, connect-on-boot |

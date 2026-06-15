@@ -1,71 +1,49 @@
-//! Status / connection summary view.
+//! Status / connection dashboard — the polished top panel rendered above every
+//! screen.
 //!
-//! `status_bar` renders the full connection status panel:
-//!   - App header (name + version)
-//!   - Large connection indicator with colour driven by `TunnelStatus`
-//!   - Live stats (last-handshake age, rx/tx, endpoint) when Connected
-//!   - Public-IP display when available
-//!   - Disconnect button (only when Connected)
-//!   - Navigation row: New | Import | Settings
+//! Layout (top to bottom):
+//!
+//! 1. App header row: shield icon + "WireGuard" title + version badge.
+//! 2. Connection hero card: a [`status_pill`] (Connected / Connecting /
+//!    Disconnecting / Error / Idle), the active profile name as the card title,
+//!    and a primary action button ("⏻ Connect" in primary style or "✕
+//!    Disconnect" in danger style) — icon-labelled so the toolbar is never bare
+//!    text.
+//! 3. Stats row (only while Connected AND `live_status` is present): tiles for
+//!    Endpoint, Duration, ↓ Received, ↑ Sent, Last Handshake, and Public IP. The
+//!    transfer tile embeds a mini bar-sparkline drawn from
+//!    [`State::throughput_history`] using container widgets (no canvas feature
+//!    required).
+//! 4. Toolbar: icon buttons (New | Import | Server | Settings).
+//!
+//! Every colour, spacing, radius, card surface, pill, and button style is
+//! sourced from [`crate::ui::theme`] — never hard-coded here.
 
 use std::time::SystemTime;
 
 use iced::widget::{button, column, container, row, text};
-use iced::{Alignment, Color, Element, Length, Padding};
+use iced::{Alignment, Background, Color, Element, Length, Padding};
 
 use crate::app::{Message, State, TunnelStatus};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Colour palette (hex → iced::Color)
-// ─────────────────────────────────────────────────────────────────────────────
-
-const GREEN: Color = Color {
-    r: 0.133,
-    g: 0.773,
-    b: 0.369,
-    a: 1.0,
-};
-const YELLOW: Color = Color {
-    r: 0.957,
-    g: 0.761,
-    b: 0.051,
-    a: 1.0,
-};
-const RED: Color = Color {
-    r: 0.937,
-    g: 0.267,
-    b: 0.267,
-    a: 1.0,
-};
-const GREY: Color = Color {
-    r: 0.557,
-    g: 0.557,
-    b: 0.557,
-    a: 1.0,
-};
-const WHITE: Color = Color {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
+use crate::ui::theme::{self, StatusKind};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Render the live connection / status summary panel.
+/// Render the connection dashboard panel.
+///
+/// Called from the profile-list view (and other screens that show the status
+/// bar at the top). Reads [`State`] fields; never mutates state.
 pub fn status_bar(state: &State) -> Element<'_, Message> {
     let content = column![
         app_header(),
-        iced::widget::rule::horizontal(1),
-        connection_indicator(state),
-        live_stats_section(state),
-        iced::widget::rule::horizontal(1),
-        nav_row(),
+        hero_card(state),
+        stats_section(state),
+        toolbar(),
     ]
-    .spacing(12)
-    .padding(Padding::from([16, 20]));
+    .spacing(theme::SPACE_MD)
+    .padding(Padding::from([theme::SPACE_LG, theme::SPACE_XL]));
 
     container(content)
         .width(Length::Fill)
@@ -73,225 +51,382 @@ pub fn status_bar(state: &State) -> Element<'_, Message> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// App header: icon text + version
+// App header
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn app_header<'a>() -> Element<'a, Message> {
-    let name = text("WireGuard")
-        .size(22)
-        .color(WHITE);
+    let shield = theme::icon(theme::icons::SHIELD);
+    let name = theme::title("WireGuard");
+    let ver = theme::muted(concat!("v", env!("CARGO_PKG_VERSION")));
 
-    let version = text(concat!("v", env!("CARGO_PKG_VERSION")))
-        .size(13)
-        .color(GREY);
-
-    // Shield icon rendered as styled text — no external asset dependency.
-    let icon = text("🛡")
-        .size(26);
-
-    row![icon, name, version]
-        .spacing(8)
+    row![shield, name, ver]
+        .spacing(theme::SPACE_SM)
         .align_y(Alignment::Center)
         .into()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Connection indicator + disconnect button
+// Hero connection card
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn connection_indicator(state: &State) -> Element<'_, Message> {
-    let (dot_color, label, sub_label): (Color, &str, Option<String>) =
-        match &state.tunnel_status {
-            TunnelStatus::Connected(name) => (
-                GREEN,
-                "Connected",
-                Some(name.clone()),
-            ),
-            TunnelStatus::Connecting(name) => (
-                YELLOW,
-                "Connecting…",
-                Some(name.clone()),
-            ),
-            TunnelStatus::Disconnecting => (
-                YELLOW,
-                "Disconnecting…",
-                None,
-            ),
-            TunnelStatus::Error(msg) => (
-                RED,
-                "Error",
-                Some(msg.clone()),
-            ),
-            TunnelStatus::Disconnected => (
-                GREY,
-                "Disconnected",
-                None,
-            ),
-        };
+fn hero_card(state: &State) -> Element<'_, Message> {
+    let (kind, status_label, profile_name) = tunnel_kind(state);
 
-    let is_connected = matches!(state.tunnel_status, TunnelStatus::Connected(_));
+    // Large status pill.
+    let pill = theme::status_pill(status_label, kind);
 
-    // Large coloured dot.
-    let dot = container(text(" "))
-        .width(Length::Fixed(14.0))
-        .height(Length::Fixed(14.0))
-        .style(move |_theme| {
-            container::Style {
-                background: Some(iced::Background::Color(dot_color)),
-                border: iced::Border {
-                    radius: iced::border::Radius::from(7.0),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        });
-
-    let status_label = text(label)
-        .size(28)
-        .color(dot_color);
-
-    let mut indicator_col = column![
-        row![dot, status_label]
-            .spacing(10)
-            .align_y(Alignment::Center),
-    ]
-    .spacing(4);
-
-    if let Some(sub) = sub_label {
-        let sub_text = text(sub).size(14).color(GREY);
-        indicator_col = indicator_col.push(sub_text);
-    }
-
-    // Public IP row (shown whenever it is known).
-    if let Some(ip) = &state.public_ip {
-        let ip_label = text(format!("Public IP: {ip}")).size(13).color(GREY);
-        indicator_col = indicator_col.push(ip_label);
-    } else if state.public_ip_loading {
-        indicator_col = indicator_col.push(
-            text("Fetching public IP…").size(13).color(GREY),
-        );
-    }
-
-    // Disconnect button — only enabled while Connected.
-    let disconnect_btn = if is_connected {
-        button(text("Disconnect").size(14))
-            .on_press(Message::DisconnectCurrent)
-            .style(button::danger)
+    // Profile name — shown when there is an active profile.
+    let name_row: Element<'_, Message> = if let Some(name) = profile_name {
+        theme::section_title(name).into()
     } else {
-        // Visually disabled — no on_press means iced renders it greyed automatically.
-        button(text("Disconnect").size(14))
-            .style(button::danger)
+        theme::muted("No profile selected").into()
     };
 
-    row![
-        indicator_col.width(Length::Fill),
-        disconnect_btn,
+    // Primary action: Connect or Disconnect depending on state.
+    let action_btn = action_button(state);
+
+    let hero_inner = row![
+        column![pill, name_row]
+            .spacing(theme::SPACE_SM)
+            .width(Length::Fill),
+        action_btn,
     ]
-    .spacing(16)
-    .align_y(Alignment::Center)
-    .into()
-}
+    .spacing(theme::SPACE_MD)
+    .align_y(Alignment::Center);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Live stats (handshake age, rx/tx, endpoint) — only while Connected
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn live_stats_section(state: &State) -> Element<'_, Message> {
-    // Only render while there is live status data to show.
-    let Some(live) = &state.live_status else {
-        return iced::widget::Space::new().into();
-    };
-
-    // Aggregate across all peers for totals.
-    let total_rx: u64 = live.peers.iter().map(|p| p.rx_bytes).sum();
-    let total_tx: u64 = live.peers.iter().map(|p| p.tx_bytes).sum();
-
-    // Last handshake: take the most-recently-seen peer.
-    let latest_handshake = live
-        .peers
-        .iter()
-        .filter_map(|p| p.last_handshake)
-        .max();
-
-    let mut stats_col = column![].spacing(6);
-
-    // Handshake age.
-    let handshake_str = match latest_handshake {
-        Some(hs) => {
-            let age_secs = SystemTime::now()
-                .duration_since(hs)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("Last handshake: {}", format_duration(age_secs))
-        }
-        None => "Last handshake: never".to_owned(),
-    };
-    stats_col = stats_col.push(stat_row("", handshake_str));
-
-    // rx / tx transfer.
-    stats_col = stats_col.push(stat_row(
-        "",
-        format!(
-            "Transfer: {} received  /  {} sent",
-            format_bytes(total_rx),
-            format_bytes(total_tx)
-        ),
-    ));
-
-    // Endpoint (first peer with a known endpoint).
-    if let Some(endpoint) = live.peers.iter().find_map(|p| p.endpoint.as_deref()) {
-        stats_col = stats_col.push(stat_row("", format!("Endpoint: {endpoint}")));
-    }
-
-    container(stats_col)
-        .padding(Padding::from([8, 12]))
-        .style(|theme: &iced::Theme| {
-            let palette = theme.palette();
-            container::Style {
-                background: Some(iced::Background::Color(Color {
-                    r: palette.background.r * 0.85,
-                    g: palette.background.g * 0.85,
-                    b: palette.background.b * 0.85,
-                    a: 1.0,
-                })),
-                border: iced::Border {
-                    radius: iced::border::Radius::from(6.0),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }
-        })
+    container(hero_inner)
+        .padding(theme::CARD_PADDING)
+        .style(theme::card_style)
         .width(Length::Fill)
         .into()
 }
 
-/// A small labelled stat row (icon glyph + text, monospaced feel).
-///
-/// Takes owned strings so the returned element borrows nothing from the caller's
-/// locals (the fragments are moved into the `text` widgets).
-fn stat_row(icon: impl Into<String>, label: impl Into<String>) -> Element<'static, Message> {
-    let icon_w = text(icon.into()).size(13).color(GREY);
-    let label_w = text(label.into()).size(13).color(GREY);
-    row![icon_w, label_w].spacing(6).align_y(Alignment::Center).into()
+/// Derive the [`StatusKind`], a display label, and the active profile name
+/// from the current [`TunnelStatus`].
+fn tunnel_kind(state: &State) -> (StatusKind, &'static str, Option<String>) {
+    match &state.tunnel_status {
+        TunnelStatus::Connected(name) => (StatusKind::Connected, "Connected", Some(name.clone())),
+        TunnelStatus::Connecting(name) => {
+            (StatusKind::Connecting, "Connecting\u{2026}", Some(name.clone()))
+        }
+        TunnelStatus::Disconnecting => (StatusKind::Connecting, "Disconnecting\u{2026}", None),
+        TunnelStatus::Error(msg) => (StatusKind::Error, "Error", Some(msg.clone())),
+        TunnelStatus::Disconnected => (StatusKind::Idle, "Disconnected", None),
+    }
+}
+
+/// The primary CTA button.  When connected: "✕ Disconnect" in danger style.
+/// When disconnecting or connecting: show a disabled ghost button.
+/// When disconnected with an active profile: "⏻ Connect" in primary style.
+/// Otherwise: a disabled "⏻ Connect" placeholder.
+fn action_button(state: &State) -> Element<'_, Message> {
+    match &state.tunnel_status {
+        TunnelStatus::Connected(_) => {
+            let label = row![
+                theme::icon(theme::icons::STOP),
+                text("Disconnect").size(theme::TEXT_BODY),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(Alignment::Center);
+
+            button(label)
+                .on_press(Message::DisconnectCurrent)
+                .style(theme::danger())
+                .padding([theme::SPACE_SM, theme::SPACE_MD])
+                .into()
+        }
+        TunnelStatus::Connecting(_) | TunnelStatus::Disconnecting => {
+            // In-flight — show a disabled ghost button so the layout does not jump.
+            let label = row![
+                theme::icon(theme::icons::POWER),
+                text("Connect").size(theme::TEXT_BODY),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(Alignment::Center);
+
+            button(label)
+                .style(theme::ghost())
+                .padding([theme::SPACE_SM, theme::SPACE_MD])
+                .into()
+        }
+        TunnelStatus::Disconnected | TunnelStatus::Error(_) => {
+            let label = row![
+                theme::icon(theme::icons::POWER),
+                text("Connect").size(theme::TEXT_BODY),
+            ]
+            .spacing(theme::SPACE_XS)
+            .align_y(Alignment::Center);
+
+            if let Some(name) = &state.active_profile {
+                let name = name.clone();
+                button(label)
+                    .on_press(Message::ConnectProfile(name))
+                    .style(theme::primary())
+                    .padding([theme::SPACE_SM, theme::SPACE_MD])
+                    .into()
+            } else {
+                button(label)
+                    .style(theme::ghost())
+                    .padding([theme::SPACE_SM, theme::SPACE_MD])
+                    .into()
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Navigation row: New | Import | Settings
+// Stats section (Connected + live data only)
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn nav_row<'a>() -> Element<'a, Message> {
-    let new_btn = button(text("+ New").size(13))
-        .on_press(Message::OpenNewProfile);
+fn stats_section(state: &State) -> Element<'_, Message> {
+    let Some(live) = &state.live_status else {
+        // Nothing to show if not connected / no live data.
+        return iced::widget::Space::new().into();
+    };
 
-    let import_btn = button(text("Import").size(13))
-        .on_press(Message::ImportProfile);
+    // Aggregate rx/tx across all peers.
+    let total_rx: u64 = live.peers.iter().map(|p| p.rx_bytes).sum();
+    let total_tx: u64 = live.peers.iter().map(|p| p.tx_bytes).sum();
 
-    let settings_btn = button(text("Settings").size(13))
-        .on_press(Message::OpenSettings);
+    // Latest handshake across peers.
+    let latest_handshake = live.peers.iter().filter_map(|p| p.last_handshake).max();
 
-    row![new_btn, import_btn, settings_btn]
-        .spacing(8)
+    // Endpoint of first peer with one.
+    let endpoint = live.peers.iter().find_map(|p| p.endpoint.as_deref());
+
+    // Connected duration from connected_since.
+    let duration_str = match state.connected_since {
+        Some(since) => {
+            let secs = since.elapsed().as_secs();
+            format_uptime(secs)
+        }
+        None => "—".to_owned(),
+    };
+
+    // Handshake age.
+    let handshake_str = match latest_handshake {
+        Some(hs) => {
+            let age = SystemTime::now()
+                .duration_since(hs)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            format_duration(age)
+        }
+        None => "never".to_owned(),
+    };
+
+    // Public IP.
+    let ip_str = match &state.public_ip {
+        Some(ip) => ip.as_str(),
+        None => {
+            if state.public_ip_loading {
+                "fetching\u{2026}"
+            } else {
+                "—"
+            }
+        }
+    };
+
+    // Build the bar-sparkline from throughput history.
+    let sparkline_data: Vec<(u64, u64)> = state.throughput_history.iter().copied().collect();
+    let sparkline_el: Element<'_, Message> = bar_sparkline(&sparkline_data);
+
+    // Tiles layout: two rows of three.
+    let row1 = row![
+        stat_tile(
+            "Endpoint",
+            endpoint.unwrap_or("—").to_owned(),
+            None::<Element<'_, Message>>,
+        ),
+        stat_tile("Duration", duration_str, None::<Element<'_, Message>>),
+        stat_tile(
+            "Transfer",
+            format!("\u{2193} {}  \u{2191} {}", format_bytes(total_rx), format_bytes(total_tx)),
+            Some(sparkline_el),
+        ),
+    ]
+    .spacing(theme::SPACE_SM);
+
+    let row2 = row![
+        stat_tile(
+            "Last Handshake",
+            handshake_str,
+            None::<Element<'_, Message>>,
+        ),
+        stat_tile("Public IP", ip_str.to_owned(), None::<Element<'_, Message>>),
+        // Spacer tile to keep the grid balanced.
+        iced::widget::Space::new().width(Length::Fill),
+    ]
+    .spacing(theme::SPACE_SM);
+
+    column![row1, row2]
+        .spacing(theme::SPACE_SM)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A single stat tile: a surface card with a muted label and a value.
+/// Optionally includes an extra widget (sparkline) below the value.
+///
+/// Takes the `value` by owned `String` so callers can pass freshly-`format!`ed
+/// text without lifetime gymnastics (the text widget owns its fragment).
+fn stat_tile<'a>(
+    label: &'a str,
+    value: String,
+    extra: Option<impl Into<Element<'a, Message>>>,
+) -> Element<'a, Message> {
+    let mut col = column![
+        theme::muted(label),
+        theme::body(value),
+    ]
+    .spacing(theme::SPACE_XS);
+
+    if let Some(w) = extra {
+        col = col.push(w.into());
+    }
+
+    container(col)
+        .padding(theme::CARD_PADDING)
+        .style(theme::surface_style)
+        .width(Length::Fill)
+        .into()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Toolbar: New | Import | Server | Settings
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn toolbar<'a>() -> Element<'a, Message> {
+    let new_btn = icon_btn(theme::icons::PLUS, "New", Message::OpenNewProfile);
+    let import_btn = icon_btn(theme::icons::IMPORT, "Import", Message::ImportProfile);
+    let server_btn = icon_btn(theme::icons::SERVER, "Server", Message::OpenServer);
+    let settings_btn = icon_btn(theme::icons::GEAR, "Settings", Message::OpenSettings);
+
+    row![new_btn, import_btn, server_btn, settings_btn]
+        .spacing(theme::SPACE_SM)
         .align_y(Alignment::Center)
+        .into()
+}
+
+/// Build a compact toolbar button: icon glyph + label, icon_button style.
+fn icon_btn<'a>(glyph: &'a str, label: &'a str, msg: Message) -> Element<'a, Message> {
+    let content = row![
+        theme::icon(glyph),
+        text(label).size(theme::TEXT_BODY),
+    ]
+    .spacing(theme::SPACE_XS)
+    .align_y(Alignment::Center);
+
+    button(content)
+        .on_press(msg)
+        .style(theme::icon_button())
+        .padding([theme::SPACE_XS, theme::SPACE_SM])
+        .into()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Throughput bar-sparkline (pure iced widgets, no canvas feature needed)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render a compact bar-sparkline from cumulative `(rx, tx)` byte history.
+///
+/// Derives per-interval deltas from the samples, then draws a row of thin
+/// vertical `container` bars — blue (rx) stacked above grey (tx) — scaled to
+/// the max delta observed.  Capped to the last 20 samples for a tight visual.
+/// Returns an owned `Element<'static, Message>` so it fits inside `stat_tile`.
+fn bar_sparkline(data: &[(u64, u64)]) -> Element<'static, Message> {
+    const BAR_H: f32 = 28.0; // total bar height (px)
+    const BAR_W: f32 = 4.0;  // bar width
+    const MAX_BARS: usize = 20;
+
+    // Need at least two points for one delta.
+    if data.len() < 2 {
+        return iced::widget::Space::new()
+            .width(Length::Fixed(80.0))
+            .height(Length::Fixed(BAR_H))
+            .into();
+    }
+
+    // Deltas (rate per tick) for the last MAX_BARS intervals.
+    let window_start = data.len().saturating_sub(MAX_BARS + 1);
+    let window = &data[window_start..];
+    let deltas: Vec<(u64, u64)> = window
+        .windows(2)
+        .map(|w| {
+            (
+                w[1].0.saturating_sub(w[0].0),
+                w[1].1.saturating_sub(w[0].1),
+            )
+        })
+        .collect();
+
+    let max_val = deltas
+        .iter()
+        .map(|(rx, tx)| rx.max(tx))
+        .copied()
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+
+    // Build the bar row as owned containers, collecting into an owned column.
+    let bars: Vec<Element<'static, Message>> = deltas
+        .into_iter()
+        .map(|(rx, tx)| {
+            let rx_h = (rx as f32 / max_val * BAR_H * 0.85).max(1.0);
+            let tx_h = (tx as f32 / max_val * BAR_H * 0.85).max(1.0);
+
+            // rx bar (accent blue).
+            let rx_bar = container(
+                iced::widget::Space::new()
+                    .width(Length::Fixed(BAR_W))
+                    .height(Length::Fixed(rx_h)),
+            )
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    r: 0.231,
+                    g: 0.510,
+                    b: 0.965,
+                    a: 0.85,
+                })),
+                ..container::Style::default()
+            });
+
+            // tx bar (muted grey).
+            let tx_bar = container(
+                iced::widget::Space::new()
+                    .width(Length::Fixed(BAR_W))
+                    .height(Length::Fixed(tx_h)),
+            )
+            .style(|_theme: &iced::Theme| container::Style {
+                background: Some(Background::Color(Color {
+                    r: 0.580,
+                    g: 0.624,
+                    b: 0.694,
+                    a: 0.65,
+                })),
+                ..container::Style::default()
+            });
+
+            // Stack rx above tx, anchored to the bottom.
+            let bar_col: Element<'static, Message> = column![rx_bar, tx_bar]
+                .spacing(1)
+                .into();
+
+            // Wrap in a fixed-height container, aligned to the bottom.
+            container(bar_col)
+                .width(Length::Fixed(BAR_W + 2.0))
+                .height(Length::Fixed(BAR_H))
+                .align_y(iced::alignment::Vertical::Bottom)
+                .into()
+        })
+        .collect();
+
+    // Assemble bars into a row.
+    let bar_row = row(bars).spacing(2).align_y(Alignment::End);
+
+    container(bar_row)
+        .width(Length::Fixed(80.0))
+        .height(Length::Fixed(BAR_H))
         .into()
 }
 
@@ -299,7 +434,22 @@ fn nav_row<'a>() -> Element<'a, Message> {
 // Formatting helpers (pure, no I/O)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Format a duration in seconds as a human-readable string ("2 minutes ago", etc.).
+/// Format a connected-for uptime in seconds as "2h 14m", "45s", etc.
+fn format_uptime(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{m}m {s:02}s")
+    } else {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        format!("{h}h {m:02}m")
+    }
+}
+
+/// Format a handshake age in seconds as "2 minutes ago", etc.
 fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs} second{} ago", if secs == 1 { "" } else { "s" })
@@ -340,6 +490,8 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    // ── format_bytes ──────────────────────────────────────────────────────────
+
     #[test]
     fn format_bytes_under_kib() {
         assert_eq!(format_bytes(0), "0 B");
@@ -363,6 +515,8 @@ mod tests {
     fn format_bytes_gib() {
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
     }
+
+    // ── format_duration ───────────────────────────────────────────────────────
 
     #[test]
     fn format_duration_seconds() {
@@ -388,5 +542,26 @@ mod tests {
     fn format_duration_days() {
         assert_eq!(format_duration(86400), "1 day ago");
         assert_eq!(format_duration(86400 * 3), "3 days ago");
+    }
+
+    // ── format_uptime ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn uptime_seconds_only() {
+        assert_eq!(format_uptime(0), "0s");
+        assert_eq!(format_uptime(59), "59s");
+    }
+
+    #[test]
+    fn uptime_minutes_and_seconds() {
+        assert_eq!(format_uptime(60), "1m 00s");
+        assert_eq!(format_uptime(90), "1m 30s");
+        assert_eq!(format_uptime(3599), "59m 59s");
+    }
+
+    #[test]
+    fn uptime_hours_and_minutes() {
+        assert_eq!(format_uptime(3600), "1h 00m");
+        assert_eq!(format_uptime(7384), "2h 03m");
     }
 }
