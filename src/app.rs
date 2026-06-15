@@ -225,6 +225,15 @@ pub struct State {
     /// Zero-indexed auto-reconnect attempt counter, fed to [`watchdog::next_backoff`].
     /// Reset to 0 on a confirmed-fresh handshake or a user-initiated connect.
     pub(crate) reconnect_attempt: u32,
+    /// Live `Content` for the raw `.conf` text editor.
+    ///
+    /// Held on the (non-`Clone`) top-level `State` — NOT on the `Clone`able
+    /// `EditorState` — because `text_editor::Content` is neither `Clone` nor
+    /// `Debug`. Mutated in place via `perform(action)` so the cursor/selection
+    /// persist across frames (a fresh `Content::with_text` every frame would
+    /// reset the cursor to 0 and break Backspace/Delete). Re-seeded from
+    /// `editor.raw_text` whenever the raw editor becomes visible.
+    pub(crate) raw_editor_content: iced::widget::text_editor::Content,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +283,11 @@ pub enum Message {
     EditProfile(String),
     EditorFieldChanged(EditorField),
     EditorToggleRaw,
-    RawTextChanged(String),
+    /// A text-editor action (insert/delete/move/select/…) on the raw `.conf`
+    /// editor. Applied to the persisted [`State::raw_editor_content`] so the
+    /// cursor survives across frames, then the resulting text is mirrored back
+    /// into `editor.raw_text` and re-parsed.
+    RawEditorAction(iced::widget::text_editor::Action),
     EditorSave,
     EditorSaveResult(Result<WgProfile, AppError>),
     EditorCancel,
@@ -356,6 +369,7 @@ impl State {
             start_hidden,
             intentional_down: false,
             reconnect_attempt: 0,
+            raw_editor_content: iced::widget::text_editor::Content::new(),
         };
 
         // Load all profiles (list names → read each) and settings concurrently.
@@ -629,6 +643,9 @@ impl State {
                     validation_errors: Vec::new(),
                     is_new: true,
                 });
+                // Ready the raw-editor Content so a toggle-to-raw shows the conf
+                // immediately with a working cursor.
+                self.seed_raw_editor_content();
                 self.screen = Screen::Editor;
                 Task::none()
             }
@@ -645,6 +662,9 @@ impl State {
                             validation_errors,
                             is_new: false,
                         });
+                        // Ready the raw-editor Content so a toggle-to-raw shows the
+                        // conf immediately with a working cursor.
+                        self.seed_raw_editor_content();
                         self.screen = Screen::Editor;
                     }
                     None => self.set_banner(BannerKind::Error, format!("Profile '{name}' not found")),
@@ -663,31 +683,24 @@ impl State {
                 // Flip between the structured Editor and the RawEditor.
                 self.screen = match self.screen {
                     Screen::RawEditor => Screen::Editor,
-                    _ => Screen::RawEditor,
+                    _ => {
+                        // Entering raw mode: re-seed the live Content from the
+                        // current `.conf` text so the box shows it with a fresh,
+                        // working cursor (the structured side keeps `raw_text`
+                        // current via `EditorFieldChanged`).
+                        self.seed_raw_editor_content();
+                        Screen::RawEditor
+                    }
                 };
                 Task::none()
             }
-            Message::RawTextChanged(text) => {
-                if let Some(editor) = self.editor.as_mut() {
-                    editor.raw_text = text.clone();
-                    let name = if editor.profile_name.is_empty() {
-                        editor.draft.name.clone()
-                    } else {
-                        editor.profile_name.clone()
-                    };
-                    match WgProfile::from_conf_str(&name, &text) {
-                        Ok(mut parsed) => {
-                            // Preserve the original on-disk path so saves overwrite in place.
-                            parsed.path = editor.draft.path.clone();
-                            editor.draft = parsed;
-                            editor.validation_errors = editor.draft.validate();
-                            self.banner = None;
-                        }
-                        Err(e) => {
-                            self.set_banner(BannerKind::Warning, format!("Parse error: {e}"));
-                        }
-                    }
-                }
+            Message::RawEditorAction(action) => {
+                // Mutate the persisted Content in place so the cursor/selection
+                // survive across frames (the bug fix: a fresh Content every frame
+                // reset the cursor to 0, so Backspace/Delete did nothing).
+                self.raw_editor_content.perform(action);
+                let text = self.raw_editor_content.text();
+                self.sync_raw_text(text);
                 Task::none()
             }
             Message::EditorSave => {
@@ -961,6 +974,49 @@ impl State {
 
     fn set_banner(&mut self, kind: BannerKind, message: String) {
         self.banner = Some(Banner { kind, message });
+    }
+
+    /// Mirror raw `.conf` text into the open editor and re-parse it.
+    ///
+    /// Sets `editor.raw_text`, re-parses via [`WgProfile::from_conf_str`] (keeping
+    /// the original on-disk path so saves overwrite in place), refreshes
+    /// `validation_errors`, and surfaces a parse error via the banner — exactly the
+    /// behaviour the former `RawTextChanged` handler had. A no-op when no editor is
+    /// open. Does NOT touch `self.raw_editor_content` (the caller owns the cursor).
+    fn sync_raw_text(&mut self, text: String) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        editor.raw_text = text.clone();
+        let name = if editor.profile_name.is_empty() {
+            editor.draft.name.clone()
+        } else {
+            editor.profile_name.clone()
+        };
+        match WgProfile::from_conf_str(&name, &text) {
+            Ok(mut parsed) => {
+                // Preserve the original on-disk path so saves overwrite in place.
+                parsed.path = editor.draft.path.clone();
+                editor.draft = parsed;
+                editor.validation_errors = editor.draft.validate();
+                self.banner = None;
+            }
+            Err(e) => {
+                self.set_banner(BannerKind::Warning, format!("Parse error: {e}"));
+            }
+        }
+    }
+
+    /// Re-seed [`State::raw_editor_content`] from the open editor's `raw_text`.
+    ///
+    /// Called whenever the raw editor becomes visible (opening an editor screen or
+    /// toggling structured → raw) so the box shows the current `.conf` with a fresh,
+    /// working cursor. A no-op when no editor is open.
+    fn seed_raw_editor_content(&mut self) {
+        if let Some(editor) = self.editor.as_ref() {
+            self.raw_editor_content =
+                iced::widget::text_editor::Content::with_text(&editor.raw_text);
+        }
     }
 
     fn find_profile(&self, name: &str) -> Option<&WgProfile> {

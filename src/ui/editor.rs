@@ -3,15 +3,12 @@
 //! `editor` renders the structured form (Interface fields + Peers).
 //! `raw_editor` renders a full-height text editor for the raw `.conf` content.
 //!
-//! # Raw-editor Content lifetime
-//! `iced::widget::text_editor` requires `&'a Content` where `'a` matches the
-//! returned `Element<'a, …>`. Because `EditorState` is frozen (no `Content`
-//! field), we hold the `Content` in a `thread_local!` and use a raw-pointer
-//! cast to extend the borrow lifetime to `'a`. This is **sound** in iced's
-//! single-threaded view model: the runtime drops the element tree before the
-//! next `view()` call, so no two borrows of the thread-local Content overlap.
-
-use std::cell::UnsafeCell;
+//! The raw editor borrows the persisted [`text_editor::Content`] that lives on
+//! the top-level `State` (`state.raw_editor_content`). Holding the `Content`
+//! there — and mutating it in place via `perform(action)` in the reducer — keeps
+//! the cursor/selection alive across frames, so Backspace/Delete work. The
+//! widget takes `&'a Content`; the borrow of `state` supplies that `'a`
+//! directly, so no lifetime tricks are needed.
 
 use iced::widget::{
     button, column, container, row, scrollable, text, text_editor, text_input,
@@ -19,38 +16,6 @@ use iced::widget::{
 use iced::{Color, Element, Length, Padding};
 
 use crate::app::{BannerKind, EditorField, EditorState, Message, State};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Thread-local Content for the raw editor
-// ─────────────────────────────────────────────────────────────────────────────
-
-thread_local! {
-    /// Persistent `Content` for the raw text editor. Accessed only from the
-    /// iced view callback (single UI thread).
-    static RAW_CONTENT: UnsafeCell<text_editor::Content> =
-        UnsafeCell::new(text_editor::Content::new());
-}
-
-/// Sync the thread-local content to `text` and return a reference with the
-/// lifetime of the ambient borrow `'a`.
-///
-/// # Safety
-/// The caller must not call this function again (or mutate the thread-local in
-/// any way) while the returned reference is live. In iced's view model the
-/// element tree is always dropped before the next `view()` invocation, so this
-/// invariant holds.
-unsafe fn raw_content_synced<'a>(text: &str) -> &'a text_editor::Content {
-    RAW_CONTENT.with(|cell| {
-        let ptr = cell.get();
-        // SAFETY: see the function-level contract — the single UI thread holds no
-        // other live borrow of the thread-local while this write/read happens.
-        unsafe {
-            // Reinitialise with the current raw text.
-            *ptr = text_editor::Content::with_text(text);
-            &*ptr
-        }
-    })
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Colour helpers
@@ -443,39 +408,19 @@ pub fn editor(state: &State) -> Element<'_, Message> {
 
 /// Render the raw `.conf` text editor.
 ///
-/// Uses a `thread_local!` [`text_editor::Content`] that persists across frames
-/// so we can satisfy the `'a` lifetime requirement of
-/// `text_editor(&'a Content)` without storing `Content` in the frozen
-/// [`EditorState`].
-///
-/// **Safety invariant**: iced calls `view()` on a single UI thread and drops
-/// the element tree before the next `view()` call, so the single mutable
-/// write at the top of this function never races with any live borrow.
+/// Borrows the persisted [`text_editor::Content`] held on `state`
+/// (`state.raw_editor_content`). The reducer mutates that `Content` in place via
+/// `perform(action)` on every [`Message::RawEditorAction`], so the cursor and
+/// selection survive across frames — that is what makes Backspace/Delete work.
+/// The widget's `&'a Content` requirement is satisfied by the ordinary borrow of
+/// `state`, so no lifetime tricks are needed.
 pub fn raw_editor(state: &State) -> Element<'_, Message> {
     let Some(editor) = &state.editor else {
         return text("No profile open").into();
     };
 
-    // Sync the thread-local Content to the current raw_text then produce a
-    // reference whose lifetime is bound to `state` (the caller's `'_`).
-    //
-    // SAFETY: The write happens before any borrow is created. The returned
-    // reference is valid until `raw_editor` returns, and the element tree that
-    // borrows it is consumed (rendered + diffed) before the next `view()` call
-    // which would trigger the next write.
-    let content: &text_editor::Content =
-        unsafe { raw_content_synced(&editor.raw_text) };
-
-    let raw_text_clone = editor.raw_text.clone();
-
-    let editor_widget: Element<'_, Message> = text_editor(content)
-        .on_action(move |action| {
-            // Apply the action to a temporary Content copy to extract the
-            // updated text string, then fire RawTextChanged.
-            let mut tmp: text_editor::Content = text_editor::Content::with_text(&raw_text_clone);
-            tmp.perform(action);
-            Message::RawTextChanged(tmp.text())
-        })
+    let editor_widget: Element<'_, Message> = text_editor(&state.raw_editor_content)
+        .on_action(Message::RawEditorAction)
         .height(Length::Fill)
         .into();
 
