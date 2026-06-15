@@ -3,11 +3,12 @@
 //! # Two paths, two privilege models
 //!
 //! ## NetworkManager path (non-root, client-side)
-//! `nmcli connection modify wg-gui-<n> connection.autoconnect yes|no`
+//! `nmcli connection modify wg-gui0 connection.autoconnect yes|no`
 //!
 //! NetworkManager handles its own polkit authentication when operating on connections that belong
-//! to the calling user.  No helper, no pkexec, no root required.  The connection name convention
-//! `wg-gui-<profile_name>` matches [`crate::wg::backend::nm_connection_name`].
+//! to the calling user.  No helper, no pkexec, no root required.  The connection name is the fixed
+//! client connection [`crate::wg::backend::CLIENT_IFACE`] (`wg-gui0`) — matching
+//! [`crate::wg::backend::nm_connection_name`], which the connect path actually imports.
 //!
 //! Call [`nm_autoconnect_argv`] to obtain the ready-to-exec argv array, then pass it to
 //! `tokio::process::Command` — this module does NOT execute anything.
@@ -39,24 +40,30 @@ pub enum BootAction {
     Disable,
 }
 
-/// Build the `nmcli connection modify` argv that sets `connection.autoconnect` for a
-/// NetworkManager-managed WireGuard connection.
+/// Build the `nmcli connection modify` argv that sets `connection.autoconnect` for the
+/// NetworkManager-managed WireGuard client connection.
 ///
-/// The connection name follows the `wg-gui-<profile_name>` convention established by
-/// [`crate::wg::backend::nm_connection_name`].
+/// The connection name is the fixed [`crate::wg::backend::CLIENT_IFACE`] (`wg-gui0`),
+/// matching [`crate::wg::backend::nm_connection_name`] (which was decoupled from the
+/// profile name — the kernel interface name is capped at 15 chars and the connect path
+/// imports the conf as `wg-gui0`). The old `wg-gui-<profile_name>` convention named a
+/// connection that the connect path never creates, so autoconnect-on-boot silently
+/// targeted the wrong (non-existent) connection. This is the consistency fix.
 ///
-/// Shape: `["nmcli", "connection", "modify", "wg-gui-<profile_name>",
+/// `profile_name` is retained for call-site compatibility and is intentionally ignored.
+///
+/// Shape: `["nmcli", "connection", "modify", "wg-gui0",
 ///          "connection.autoconnect", "yes"|"no"]`
 ///
 /// This argv is safe to pass directly to `Command::new("nmcli").args(&argv[1..])` — no shell
 /// quoting needed because the arguments are in an array, not a shell string.
 ///
 /// # Arguments
-/// * `profile_name` — the profile name (bare, without the `wg-gui-` prefix).
+/// * `_profile_name` — ignored (identity/display only; see [`crate::wg::backend::CLIENT_IFACE`]).
 /// * `action` — [`BootAction::Enable`] sets `connection.autoconnect yes`;
 ///              [`BootAction::Disable`] sets `connection.autoconnect no`.
-pub fn nm_autoconnect_argv(profile_name: &str, action: BootAction) -> Vec<String> {
-    let conn_name = format!("wg-gui-{}", profile_name);
+pub fn nm_autoconnect_argv(_profile_name: &str, action: BootAction) -> Vec<String> {
+    let conn_name = crate::wg::backend::CLIENT_IFACE.to_string();
     let value = match action {
         BootAction::Enable => "yes",
         BootAction::Disable => "no",
@@ -107,7 +114,8 @@ mod tests {
     // nm_autoconnect_argv — golden string tests
     // -----------------------------------------------------------------------
 
-    /// Enable: the argv must be exactly the six-element shape with `yes`.
+    /// Enable: the argv must be exactly the six-element shape with `yes`, targeting
+    /// the fixed client connection name `wg-gui0` (NOT `wg-gui-<profile>`).
     #[test]
     fn nm_autoconnect_enable_golden() {
         let argv = nm_autoconnect_argv("home", BootAction::Enable);
@@ -117,7 +125,7 @@ mod tests {
                 "nmcli",
                 "connection",
                 "modify",
-                "wg-gui-home",
+                "wg-gui0",
                 "connection.autoconnect",
                 "yes",
             ],
@@ -135,7 +143,7 @@ mod tests {
                 "nmcli",
                 "connection",
                 "modify",
-                "wg-gui-home",
+                "wg-gui0",
                 "connection.autoconnect",
                 "no",
             ],
@@ -143,32 +151,25 @@ mod tests {
         );
     }
 
-    /// A profile name that contains hyphens must be preserved verbatim inside the
-    /// connection name.
+    /// The connection name is now decoupled from the profile name — any profile name
+    /// (hyphenated, spaced, empty) targets the same fixed `wg-gui0` connection,
+    /// matching what the connect path actually imports.
     #[test]
-    fn nm_autoconnect_hyphenated_profile_name() {
-        let argv = nm_autoconnect_argv("work-vpn", BootAction::Enable);
-        assert_eq!(argv[3], "wg-gui-work-vpn");
-        assert_eq!(argv[5], "yes");
+    fn nm_autoconnect_connection_name_is_fixed_client_iface() {
+        assert_eq!(nm_autoconnect_argv("work-vpn", BootAction::Enable)[3], "wg-gui0");
+        assert_eq!(nm_autoconnect_argv("my tunnel", BootAction::Enable)[3], "wg-gui0");
+        assert_eq!(nm_autoconnect_argv("", BootAction::Disable)[3], "wg-gui0");
+        assert_eq!(
+            nm_autoconnect_argv("anything", BootAction::Enable)[3],
+            crate::wg::backend::CLIENT_IFACE
+        );
     }
 
-    /// Profile names with spaces are unusual but must survive the round-trip as a
-    /// single argument — no shell quoting because argv is an array.
+    /// Length is always six regardless of the (ignored) profile name.
     #[test]
-    fn nm_autoconnect_profile_name_with_spaces_is_single_arg() {
-        let argv = nm_autoconnect_argv("my tunnel", BootAction::Enable);
-        assert_eq!(argv[3], "wg-gui-my tunnel",
-            "spaces must stay in one arg; argv = {argv:?}");
-        assert_eq!(argv.len(), 6);
-    }
-
-    /// An empty profile name yields `wg-gui-` (degenerate but must not panic).
-    #[test]
-    fn nm_autoconnect_empty_profile_name() {
-        let argv = nm_autoconnect_argv("", BootAction::Disable);
-        assert_eq!(argv[3], "wg-gui-");
-        assert_eq!(argv[5], "no");
-        assert_eq!(argv.len(), 6);
+    fn nm_autoconnect_always_six_elements() {
+        assert_eq!(nm_autoconnect_argv("my tunnel", BootAction::Enable).len(), 6);
+        assert_eq!(nm_autoconnect_argv("", BootAction::Disable).len(), 6);
     }
 
     /// The argv always starts with `nmcli` as argv[0] and has exactly 6 elements.

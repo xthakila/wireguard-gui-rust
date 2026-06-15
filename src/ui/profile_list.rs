@@ -220,6 +220,11 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .on_press(Message::OpenNewProfile)
         .padding([8, 14]);
 
+    // Server mode button.
+    let server_btn = button(text("Server").size(13))
+        .on_press(Message::OpenServer)
+        .padding([8, 12]);
+
     // Settings cog.
     let settings_btn = button(text("Settings").size(13))
         .on_press(Message::OpenSettings)
@@ -230,6 +235,7 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         sort_btn,
         import_btn,
         new_btn,
+        server_btn,
         settings_btn,
     ]
     .align_y(Alignment::Center)

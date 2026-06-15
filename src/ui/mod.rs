@@ -6,5 +6,6 @@
 pub mod editor;
 pub mod plan;
 pub mod profile_list;
+pub mod server;
 pub mod settings;
 pub mod status;

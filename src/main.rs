@@ -18,6 +18,7 @@ mod config;
 mod error;
 mod net;
 mod public_ip;
+mod server;
 mod settings;
 mod single_instance;
 mod tray;

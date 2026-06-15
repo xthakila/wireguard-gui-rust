@@ -117,6 +117,7 @@ pub enum Screen {
     RawEditor,
     PlanPreview,
     Settings,
+    Server,
 }
 
 /// Sort order for the profile list.
@@ -234,6 +235,21 @@ pub struct State {
     /// reset the cursor to 0 and break Backspace/Delete). Re-seeded from
     /// `editor.raw_text` whenever the raw editor becomes visible.
     pub(crate) raw_editor_content: iced::widget::text_editor::Content,
+
+    // ── SERVER mode (FROZEN — the server view reads these) ────────────────────
+    /// The loaded server config, if one has been created. `None` until the user
+    /// creates a server (or a persisted `server.json` is loaded).
+    pub(crate) server: Option<crate::server::ServerConfig>,
+    /// True while the server interface (`wg-gui-srv0`) is up.
+    pub(crate) server_running: bool,
+    /// Latest per-peer status snapshot for the running server.
+    pub(crate) server_peer_status: Vec<crate::wg::status::PeerStatus>,
+    /// The in-progress "new client name" the server screen's text input holds.
+    pub(crate) server_peer_name_input: String,
+    /// The most recently generated client config to hand out, as
+    /// `(peer_name, conf_text)`. Drives the QR / copy panel. `None` when nothing is
+    /// pending display.
+    pub(crate) last_client_conf: Option<(String, String)>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +341,40 @@ pub enum Message {
     SettingThemeChanged(ThemePreference),
     SettingsSaved(Result<(), AppError>),
 
+    // ── server mode ─────────────────────────────────────────────────────────
+    /// Navigate to the server screen.
+    OpenServer,
+    /// Result of lazily loading the persisted server config when the Server screen
+    /// is first opened. `Ok(None)` means no server has been configured yet.
+    ServerLoadResult(Result<Option<crate::server::ServerConfig>, AppError>),
+    /// Create a brand-new server config for the given endpoint host (IP/DNS name).
+    ServerCreate(String),
+    /// Result of creating (or loading) a server config.
+    ServerCreateResult(Result<crate::server::ServerConfig, AppError>),
+    /// Toggle the server interface up/down.
+    ServerStartToggle,
+    /// Result of a server start/stop operation.
+    ServerOpResult(Result<(), AppError>),
+    /// Toggle NAT (masquerade + IP forwarding) for the server subnet on/off.
+    ServerNatToggle(bool),
+    /// Result of a NAT enable/disable dispatch. `enabled` records the requested
+    /// direction for banner wording; this never alters `server_running`.
+    ServerNatResult { enabled: bool, result: Result<(), AppError> },
+    /// The "new client name" text input changed.
+    ServerPeerNameChanged(String),
+    /// Provision a new client peer (using `server_peer_name_input`).
+    ServerAddPeer,
+    /// Result of adding a peer: the updated config + the new peer's client conf text.
+    ServerAddPeerResult(Result<crate::server::ServerConfig, AppError>),
+    /// Remove the peer at the given index.
+    ServerRemovePeer(usize),
+    /// Result of removing a peer: the updated (and re-saved) config.
+    ServerRemovePeerResult(Result<crate::server::ServerConfig, AppError>),
+    /// Periodic tick to refresh the server's live peer status.
+    ServerStatusTick,
+    /// Result of a server peer-status refresh.
+    ServerStatusResult(Result<Vec<crate::wg::status::PeerStatus>, AppError>),
+
     // ── misc ──────────────────────────────────────────────────────────────────
     DismissBanner,
 }
@@ -370,6 +420,11 @@ impl State {
             intentional_down: false,
             reconnect_attempt: 0,
             raw_editor_content: iced::widget::text_editor::Content::new(),
+            server: None,
+            server_running: false,
+            server_peer_status: Vec::new(),
+            server_peer_name_input: String::new(),
+            last_client_conf: None,
         };
 
         // Load all profiles (list names → read each) and settings concurrently.
@@ -962,6 +1017,232 @@ impl State {
                 Task::none()
             }
 
+            // ── server mode ───────────────────────────────────────────────────
+            Message::OpenServer => {
+                self.screen = Screen::Server;
+                // Lazily load the persisted server config the first time the screen
+                // is opened. We only load when nothing is in memory yet so an
+                // in-session config (just created / freshly mutated) is never
+                // clobbered by an older on-disk copy. `load()` returns Ok(None) when
+                // no server has been configured — surfaced via ServerCreateResult,
+                // which treats Ok as "set/keep `self.server`".
+                if self.server.is_none() {
+                    return Task::perform(
+                        async { crate::server::ServerConfig::load() },
+                        Message::ServerLoadResult,
+                    );
+                }
+                Task::none()
+            }
+            Message::ServerLoadResult(result) => {
+                match result {
+                    // A persisted config exists — adopt it.
+                    Ok(Some(config)) => self.server = Some(config),
+                    // No server configured yet: stay on the (empty) Server screen so
+                    // the user can create one. Not an error.
+                    Ok(None) => {}
+                    Err(e) => {
+                        self.set_banner(BannerKind::Warning, format!("Load server failed: {e}"))
+                    }
+                }
+                Task::none()
+            }
+            Message::ServerCreate(endpoint_host) => Task::perform(
+                async move {
+                    // Generate the fresh config, then persist it immediately so the
+                    // private key survives a restart. Detect the egress interface
+                    // (read-only `ip route`) so NAT can be enabled later without a
+                    // second probe; this is side-effect-free and never brings NAT up.
+                    let mut config = crate::server::ServerConfig::generate_new(&endpoint_host)?;
+                    config.egress_iface = crate::server::manage::detect_egress_iface();
+                    config.save()?;
+                    Ok(config)
+                },
+                Message::ServerCreateResult,
+            ),
+            Message::ServerCreateResult(result) => {
+                match result {
+                    Ok(config) => {
+                        self.server = Some(config);
+                        self.set_banner(BannerKind::Success, "Server created".to_owned());
+                    }
+                    Err(e) => self.set_banner(BannerKind::Error, format!("Create server failed: {e}")),
+                }
+                Task::none()
+            }
+            Message::ServerStartToggle => {
+                let Some(config) = self.server.clone() else {
+                    self.set_banner(BannerKind::Warning, "No server to start".to_owned());
+                    return Task::none();
+                };
+                let was_running = self.server_running;
+                Task::perform(
+                    async move {
+                        if was_running {
+                            crate::server::manage::stop().await
+                        } else {
+                            crate::server::manage::start(&config).await
+                        }
+                    },
+                    Message::ServerOpResult,
+                )
+            }
+            Message::ServerOpResult(result) => {
+                match result {
+                    Ok(()) => {
+                        self.server_running = !self.server_running;
+                        let verb = if self.server_running { "started" } else { "stopped" };
+                        self.set_banner(BannerKind::Success, format!("Server {verb}"));
+                    }
+                    Err(e) => self.set_banner(BannerKind::Error, format!("Server op failed: {e}")),
+                }
+                Task::none()
+            }
+            Message::ServerNatToggle(on) => {
+                if let Some(config) = self.server.as_ref() {
+                    let (subnet, egress) = (config.subnet.clone(), config.egress_iface.clone());
+                    let cmd = if on {
+                        match egress {
+                            Some(egress_iface) => crate::net::privilege::PrivCmd::NatEnable {
+                                subnet,
+                                egress_iface,
+                            },
+                            None => {
+                                self.set_banner(
+                                    BannerKind::Warning,
+                                    "No egress interface detected — cannot enable NAT".to_owned(),
+                                );
+                                return Task::none();
+                            }
+                        }
+                    } else {
+                        crate::net::privilege::PrivCmd::NatDisable
+                    };
+                    Task::perform(
+                        async move { run_privileged(&cmd).await },
+                        move |result| Message::ServerNatResult { enabled: on, result },
+                    )
+                } else {
+                    Task::none()
+                }
+            }
+            Message::ServerNatResult { enabled, result } => {
+                // NAT is independent of the interface being up: never touch
+                // `server_running` here (routing through `ServerOpResult` would have
+                // wrongly toggled it).
+                match result {
+                    Ok(()) => {
+                        let verb = if enabled { "enabled" } else { "disabled" };
+                        self.set_banner(BannerKind::Success, format!("NAT {verb}"));
+                    }
+                    Err(e) => {
+                        let verb = if enabled { "enable" } else { "disable" };
+                        self.set_banner(BannerKind::Error, format!("NAT {verb} failed: {e}"));
+                    }
+                }
+                Task::none()
+            }
+            Message::ServerPeerNameChanged(name) => {
+                self.server_peer_name_input = name;
+                Task::none()
+            }
+            Message::ServerAddPeer => {
+                let Some(mut config) = self.server.clone() else {
+                    return Task::none();
+                };
+                let name = std::mem::take(&mut self.server_peer_name_input);
+                if name.trim().is_empty() {
+                    self.set_banner(BannerKind::Warning, "Enter a client name first".to_owned());
+                    return Task::none();
+                }
+                let running = self.server_running;
+                Task::perform(
+                    async move {
+                        config.add_peer(&name)?;
+                        // Persist so the new peer survives a restart.
+                        config.save()?;
+                        // If the server is up, rewrite + re-apply the running conf so
+                        // the new peer is admitted live (idempotent ServerWriteConf +
+                        // ServerUp). Best-effort: a failure here is reported, but the
+                        // config is already saved.
+                        if running {
+                            crate::server::manage::start(&config).await?;
+                        }
+                        Ok(config)
+                    },
+                    Message::ServerAddPeerResult,
+                )
+            }
+            Message::ServerAddPeerResult(result) => {
+                match result {
+                    Ok(config) => {
+                        // Surface the newly-added peer's client conf for QR/copy.
+                        if let Some(peer) = config.peers.last() {
+                            let conf = config.client_conf(peer);
+                            self.last_client_conf = Some((peer.name.clone(), conf));
+                        }
+                        self.server = Some(config);
+                        self.set_banner(BannerKind::Success, "Client added".to_owned());
+                    }
+                    Err(e) => self.set_banner(BannerKind::Error, format!("Add client failed: {e}")),
+                }
+                Task::none()
+            }
+            Message::ServerRemovePeer(idx) => {
+                let Some(mut config) = self.server.clone() else {
+                    return Task::none();
+                };
+                // Clear any pending hand-out conf for the peer being revoked — the QR
+                // panel must not keep showing a config we just removed.
+                self.last_client_conf = None;
+                let running = self.server_running;
+                Task::perform(
+                    async move {
+                        config.remove_peer(idx);
+                        // Persist the removal.
+                        config.save()?;
+                        // If the server is up, rewrite + re-apply so the removed peer
+                        // is dropped from the live interface (idempotent re-apply).
+                        if running {
+                            crate::server::manage::start(&config).await?;
+                        }
+                        Ok(config)
+                    },
+                    Message::ServerRemovePeerResult,
+                )
+            }
+            Message::ServerRemovePeerResult(result) => {
+                match result {
+                    Ok(config) => {
+                        self.server = Some(config);
+                        self.set_banner(BannerKind::Info, "Client removed".to_owned());
+                    }
+                    Err(e) => {
+                        self.set_banner(BannerKind::Error, format!("Remove client failed: {e}"))
+                    }
+                }
+                Task::none()
+            }
+            Message::ServerStatusTick => {
+                let Some(config) = self.server.clone() else {
+                    return Task::none();
+                };
+                if !self.server_running {
+                    return Task::none();
+                }
+                Task::perform(
+                    async move { crate::server::manage::status(&config).await },
+                    Message::ServerStatusResult,
+                )
+            }
+            Message::ServerStatusResult(result) => {
+                match result {
+                    Ok(peers) => self.server_peer_status = peers,
+                    Err(e) => self.set_banner(BannerKind::Warning, format!("Server status: {e}")),
+                }
+                Task::none()
+            }
+
             // ── misc ──────────────────────────────────────────────────────────
             Message::DismissBanner => {
                 self.banner = None;
@@ -1398,6 +1679,7 @@ impl State {
             Screen::RawEditor => crate::ui::editor::raw_editor(self),
             Screen::PlanPreview => crate::ui::plan::plan_preview(self),
             Screen::Settings => crate::ui::settings::settings(self),
+            Screen::Server => crate::ui::server::server(self),
         }
     }
 
@@ -1414,13 +1696,24 @@ impl State {
 
     /// Subscriptions: tray events, single-instance raises, periodic status, window close.
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subs = vec![
             Subscription::run(tray_event_stream),
             Subscription::run(raise_event_stream),
             iced::time::every(std::time::Duration::from_secs(5)).map(|_| Message::StatusTick),
             window::close_requests().map(Message::WindowCloseRequested),
             window::open_events().map(Message::WindowOpened),
-        ])
+        ];
+        // Poll the server's live peer status while the server interface is up. The
+        // `ServerStatusTick` handler is itself a no-op when the server is down or the
+        // config is gone, so this is doubly guarded. The `wg show … dump` it triggers
+        // is read-only and needs no root (degrades to empty on failure).
+        if self.server_running {
+            subs.push(
+                iced::time::every(std::time::Duration::from_secs(5))
+                    .map(|_| Message::ServerStatusTick),
+            );
+        }
+        Subscription::batch(subs)
     }
 
     /// Resolve the active iced [`Theme`] from the user's preference.

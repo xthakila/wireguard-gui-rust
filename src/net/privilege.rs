@@ -102,6 +102,38 @@ pub enum PrivCmd {
 
     /// Disable connect-on-boot: `systemctl disable wg-quick@<iface>`.
     BootDisableSystemd { iface: String },
+
+    // ── SERVER mode (root-only) ───────────────────────────────────────────────
+    //
+    // SAFETY: these bring up a real server interface / change host packet
+    // forwarding + NAT. The helper performs them only when running as root; the GUI
+    // only constructs + dispatches them. They operate on the fixed SERVER interface
+    // (`wg-gui-srv0`), distinct from the client interface, so the two coexist.
+    /// Write the generated server `.conf` text to the helper-owned server conf path
+    /// (`wg-gui-srv0.conf`, 0600) so a subsequent `ServerUp` can bring it up. The
+    /// conf is delivered in-band (not a path) so the unprivileged GUI never has to
+    /// stage a world-readable file holding the server's private key.
+    ServerWriteConf { conf_text: String },
+
+    /// Bring the server interface up from the previously-written conf:
+    /// `wg-quick up <server_conf_path>` on the fixed server interface.
+    ServerUp,
+
+    /// Tear the server interface down: `wg-quick down <server_conf_path>`.
+    ServerDown,
+
+    /// Enable source-NAT for the tunnel `subnet` out the host `egress_iface` and turn
+    /// on IPv4 forwarding: `sysctl -w net.ipv4.ip_forward=1` + an nft masquerade rule
+    /// in the uniquely-named `inet wg_gui_srv_nat` table (mirrors the kill-switch
+    /// lease/table pattern so it never collides with a user firewall).
+    NatEnable {
+        subnet: String,
+        egress_iface: String,
+    },
+
+    /// Remove the NAT masquerade: `nft delete table inet wg_gui_srv_nat`. IPv4
+    /// forwarding is left as-is (other services may rely on it). Idempotent.
+    NatDisable,
 }
 
 /// Build the argv for invoking the helper through `pkexec`, given the JSON `payload`.
@@ -336,5 +368,59 @@ mod tests {
         let cmd = PrivCmd::WgQuickDown { iface: "wg-gui-home".into() };
         let back: PrivCmd = serde_json::from_str(&encode(&cmd).unwrap()).unwrap();
         assert_eq!(cmd, back);
+    }
+
+    // ── SERVER-mode variants (freeze the wire shape) ─────────────────────────
+
+    #[test]
+    fn server_write_conf_round_trip() {
+        let cmd = PrivCmd::ServerWriteConf {
+            conf_text: "[Interface]\nPrivateKey = x\nListenPort = 51820\n".into(),
+        };
+        let json = encode(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"ServerWriteConf""#), "json = {json}");
+        assert!(json.contains(r#""conf_text""#), "json = {json}");
+        let back: PrivCmd = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn server_up_down_unit_variants() {
+        assert_eq!(encode(&PrivCmd::ServerUp).unwrap(), r#"{"cmd":"ServerUp"}"#);
+        assert_eq!(encode(&PrivCmd::ServerDown).unwrap(), r#"{"cmd":"ServerDown"}"#);
+        // The two are distinct on the wire.
+        assert_ne!(
+            encode(&PrivCmd::ServerUp).unwrap(),
+            encode(&PrivCmd::ServerDown).unwrap()
+        );
+        assert_eq!(
+            PrivCmd::ServerUp,
+            serde_json::from_str::<PrivCmd>(r#"{"cmd":"ServerUp"}"#).unwrap()
+        );
+        assert_eq!(
+            PrivCmd::ServerDown,
+            serde_json::from_str::<PrivCmd>(r#"{"cmd":"ServerDown"}"#).unwrap()
+        );
+    }
+
+    #[test]
+    fn nat_enable_round_trip() {
+        let cmd = PrivCmd::NatEnable {
+            subnet: "10.7.0.0/24".into(),
+            egress_iface: "eth0".into(),
+        };
+        let json = encode(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"NatEnable""#), "json = {json}");
+        assert!(json.contains(r#""subnet":"10.7.0.0/24""#), "json = {json}");
+        assert!(json.contains(r#""egress_iface":"eth0""#), "json = {json}");
+        let back: PrivCmd = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn nat_disable_unit_variant() {
+        assert_eq!(encode(&PrivCmd::NatDisable).unwrap(), r#"{"cmd":"NatDisable"}"#);
+        let back: PrivCmd = serde_json::from_str(r#"{"cmd":"NatDisable"}"#).unwrap();
+        assert_eq!(PrivCmd::NatDisable, back);
     }
 }
