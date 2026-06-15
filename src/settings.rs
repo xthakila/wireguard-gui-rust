@@ -30,9 +30,18 @@ pub struct AppSettings {
     pub kill_switch: bool,
     pub autostart: bool,
     pub close_to_tray: bool,
+    /// Show desktop notifications on connect / disconnect / drop (feature 1).
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
     /// CIDRs to exclude when split-tunnelling.
     pub destination_split: Vec<String>,
     pub netns_rules: Vec<NetnsRule>,
+}
+
+/// Serde default for boolean fields that should default to `true` when absent
+/// from an older on-disk settings file.
+fn default_true() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -44,6 +53,7 @@ impl Default for AppSettings {
             kill_switch: false,
             autostart: false,
             close_to_tray: true,
+            notifications_enabled: true,
             destination_split: Vec::new(),
             netns_rules: Vec::new(),
         }
@@ -151,6 +161,30 @@ mod tests {
     }
 
     #[test]
+    fn default_notifications_enabled_is_true() {
+        let s = AppSettings::default();
+        assert!(s.notifications_enabled);
+    }
+
+    #[test]
+    fn missing_notifications_field_defaults_true() {
+        // An older settings file without the field must deserialize to `true`
+        // (serde default) rather than `false`.
+        let json = r#"{
+            "theme": "Dark",
+            "auto_reconnect": true,
+            "connect_on_boot": null,
+            "kill_switch": false,
+            "autostart": false,
+            "close_to_tray": true,
+            "destination_split": [],
+            "netns_rules": []
+        }"#;
+        let s: AppSettings = serde_json::from_str(json).expect("deserialize");
+        assert!(s.notifications_enabled);
+    }
+
+    #[test]
     fn default_destination_split_is_empty() {
         let s = AppSettings::default();
         assert!(s.destination_split.is_empty());
@@ -190,6 +224,7 @@ mod tests {
             kill_switch: true,
             autostart: true,
             close_to_tray: false,
+            notifications_enabled: false,
             destination_split: vec!["192.168.1.0/24".to_string(), "10.0.0.0/8".to_string()],
             netns_rules: vec![NetnsRule {
                 executable_path: PathBuf::from("/usr/bin/firefox"),
@@ -205,6 +240,7 @@ mod tests {
         assert!(restored.kill_switch);
         assert!(restored.autostart);
         assert!(!restored.close_to_tray);
+        assert!(!restored.notifications_enabled);
         assert_eq!(
             restored.destination_split,
             vec!["192.168.1.0/24".to_string(), "10.0.0.0/8".to_string()]
@@ -298,6 +334,7 @@ mod tests {
             kill_switch: true,
             autostart: false,
             close_to_tray: true,
+            notifications_enabled: true,
             destination_split: vec!["172.16.0.0/12".to_string()],
             netns_rules: vec![],
         };

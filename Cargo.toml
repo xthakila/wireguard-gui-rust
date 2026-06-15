@@ -1,6 +1,6 @@
 [package]
 name = "wireguard-gui"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 
 # The GUI (default binary, from src/main.rs) and the root helper (src/bin/helper.rs).
@@ -50,6 +50,8 @@ ureq = "2"
 # that iced's `image` feature turns into an `image::Handle` for display.
 qrcode = "0.14.1"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+notify-rust = "4.17.0"
+rqrr = "0.10.1"
 
 [dev-dependencies]
 tempfile = "3"

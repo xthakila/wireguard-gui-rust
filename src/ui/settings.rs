@@ -134,12 +134,22 @@ pub fn settings(state: &State) -> Element<'_, Message> {
             .into(),
     );
 
+    let notifications_row = toggle_row(
+        "\u{1F514}  Notifications",
+        "Show a desktop notification when the tunnel connects or disconnects.",
+        checkbox(s.notifications_enabled)
+            .on_toggle(Message::SettingNotificationsToggled)
+            .into(),
+    );
+
     let behaviour_card = card_section(
         "Behaviour",
         column![
             auto_reconnect_row,
             row_divider(),
             autostart_row,
+            row_divider(),
+            notifications_row,
         ]
         .spacing(0),
     );

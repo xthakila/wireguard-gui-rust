@@ -23,8 +23,10 @@ use crate::net::privilege::run_privileged;
 use crate::net::watchdog;
 use crate::settings::{AppSettings, ThemePreference};
 use crate::single_instance::{accept_raises, InstanceGuard};
-use crate::tray::{AppTray, TrayEvent};
+use crate::stats::UsageStore;
+use crate::tray::{AppTray, TrayCmd, TrayEvent};
 use crate::wg::backend::detect_backend;
+use crate::wg::latency::{health_from_handshake, Health};
 use crate::wg::plan::{compute_plan, DryRunPlan};
 use crate::wg::status::{fetch_status, LiveStatus};
 
@@ -86,6 +88,14 @@ fn boot_runtime() {
 fn update_tray_icon(connected: bool) {
     if let Some(handle) = TRAY_HANDLE.get() {
         handle.update(move |t: &mut AppTray| t.connected = connected);
+    }
+}
+
+/// Push a [`TrayCmd`] into the live tray (profile list / connected-profile sync
+/// for the quick-connect submenu). No-op when no tray handle is installed.
+fn push_tray_cmd(cmd: TrayCmd) {
+    if let Some(handle) = TRAY_HANDLE.get() {
+        handle.update(move |t: &mut AppTray| t.apply(cmd.clone()));
     }
 }
 
@@ -267,6 +277,16 @@ pub struct State {
     /// sparkline. Push new samples with [`State::push_throughput_sample`]; the
     /// reducer calls it on each status tick (wired in the integrate stage).
     pub(crate) throughput_history: std::collections::VecDeque<(u64, u64)>,
+
+    // ── Feature state (data usage + health) ───────────────────────────────────
+    /// Persisted per-profile data-usage accounting (feature 2). Loaded at boot,
+    /// updated on each status tick from the live cumulative byte counters, and
+    /// saved back to `stats.json`. The list / dashboard views read it to show
+    /// session + lifetime usage for the active profile.
+    pub(crate) usage_store: UsageStore,
+    /// Coarse health of the active tunnel (feature 5), recomputed on each status
+    /// tick from the most-recent handshake age. `None` when no tunnel is up.
+    pub(crate) active_health: Option<Health>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -394,6 +414,23 @@ pub enum Message {
 
     // ── misc ──────────────────────────────────────────────────────────────────
     DismissBanner,
+
+    // ── new features ──────────────────────────────────────────────────────────
+    /// Result of loading the persisted data-usage store at boot (feature 2).
+    UsageLoaded(Result<UsageStore, AppError>),
+    /// Toggle desktop notifications on/off in Settings (feature 1).
+    SettingNotificationsToggled(bool),
+    /// Tray quick-connect: connect to the named profile (feature 3, forwarded
+    /// from the tray bridge). Connect logic is the same as [`Message::ConnectProfile`];
+    /// kept as a distinct variant so the bridge can map `TrayEvent::ConnectProfile`.
+    TrayConnectProfile(String),
+    /// Tray quick-connect: disconnect the current tunnel (feature 3, forwarded
+    /// from the tray bridge).
+    TrayDisconnect,
+    /// Import a profile from a QR-code image (feature 4): triggers an rfd image pick.
+    ImportFromQr,
+    /// The QR image the user picked (or `None` if the dialog was cancelled).
+    ImportFromQrChosen(Option<PathBuf>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -446,13 +483,17 @@ impl State {
             throughput_history: std::collections::VecDeque::with_capacity(
                 THROUGHPUT_HISTORY_LEN,
             ),
+            usage_store: UsageStore::default(),
+            active_health: None,
         };
 
-        // Load all profiles (list names → read each) and settings concurrently.
+        // Load all profiles (list names → read each), settings, and the usage
+        // store concurrently.
         let load_profiles = Task::perform(load_all_profiles(profile_store), Message::ProfilesLoaded);
         let load_settings = Task::perform(load_settings_async(), Message::SettingsLoaded);
+        let load_usage = Task::perform(load_usage_async(), Message::UsageLoaded);
 
-        (state, Task::batch([load_profiles, load_settings]))
+        (state, Task::batch([load_profiles, load_settings, load_usage]))
     }
 
     /// Read-only accessor for the start-hidden flag (used by `main` window setup).
@@ -494,6 +535,11 @@ async fn load_settings_async() -> Result<AppSettings, AppError> {
     AppSettings::load()
 }
 
+/// Load the persisted data-usage store off the iced thread (sync fs, wrapped).
+async fn load_usage_async() -> Result<UsageStore, AppError> {
+    UsageStore::load()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Update
 // ─────────────────────────────────────────────────────────────────────────────
@@ -508,6 +554,11 @@ impl State {
                     Ok(profiles) => {
                         self.profiles = profiles;
                         self.apply_sort();
+                        // Feature 3: keep the tray quick-connect submenu in sync
+                        // with the loaded profile list.
+                        push_tray_cmd(TrayCmd::SetProfiles(
+                            self.profiles.iter().map(|p| p.name.clone()).collect(),
+                        ));
                     }
                     Err(e) => self.set_banner(BannerKind::Error, format!("Failed to load profiles: {e}")),
                 }
@@ -616,6 +667,14 @@ impl State {
                         // history so the sparkline starts fresh for this session.
                         self.connected_since = Some(std::time::Instant::now());
                         self.throughput_history.clear();
+                        // Feature 2: a fresh connect starts a new usage session.
+                        self.usage_store.reset_session(&name);
+                        // Feature 3: tell the tray which profile is now connected.
+                        push_tray_cmd(TrayCmd::SetConnected(Some(name.clone())));
+                        // Feature 1: desktop notification (gated on the setting).
+                        if self.settings.notifications_enabled {
+                            crate::notify::notify_connected(&name);
+                        }
                         self.set_banner(BannerKind::Success, format!("Connected to {name}"));
 
                         // Kill-switch: when enabled, arm it now that the tunnel is up.
@@ -653,6 +712,18 @@ impl State {
                         // history so the dashboard stops showing a live session.
                         self.connected_since = None;
                         self.throughput_history.clear();
+                        // Feature 5: no live tunnel → no health.
+                        self.active_health = None;
+                        // Feature 3: clear the connected profile in the tray.
+                        push_tray_cmd(TrayCmd::SetConnected(None));
+                        // Feature 1: desktop notification (gated on the setting).
+                        if self.settings.notifications_enabled {
+                            let name = self
+                                .active_profile
+                                .clone()
+                                .unwrap_or_else(|| "tunnel".to_owned());
+                            crate::notify::notify_disconnected(&name);
+                        }
                         self.set_banner(BannerKind::Info, "Disconnected".to_owned());
 
                         // Kill-switch: tear it down so traffic is restored after a
@@ -957,7 +1028,21 @@ impl State {
                                 (rx.saturating_add(p.rx_bytes), tx.saturating_add(p.tx_bytes))
                             });
                             self.push_throughput_sample(rx, tx);
+
+                            // Feature 2: record cumulative usage for the active
+                            // profile and persist it. Feature 5: recompute health
+                            // from the freshest handshake age.
+                            if let Some(name) = self.active_profile.clone() {
+                                self.usage_store.record(&name, rx, tx);
+                            }
+                            self.active_health = Some(health_from_handshake(
+                                latest_handshake_age_secs(s),
+                            ));
+                            self.live_status = status;
+                            return self.save_usage_task();
                         }
+                        // Tunnel down: no health to report.
+                        self.active_health = None;
                         self.live_status = status;
                     }
                     Err(e) => {
@@ -1307,6 +1392,38 @@ impl State {
                 self.banner = None;
                 Task::none()
             }
+
+            // ── new features ────────────────────────────────────────────────
+            Message::UsageLoaded(result) => {
+                match result {
+                    Ok(store) => self.usage_store = store,
+                    Err(e) => {
+                        self.set_banner(BannerKind::Warning, format!("Failed to load usage: {e}"))
+                    }
+                }
+                Task::none()
+            }
+            Message::SettingNotificationsToggled(on) => {
+                self.settings.notifications_enabled = on;
+                self.save_settings_task()
+            }
+            // Tray quick-connect forwards into the existing connect/disconnect
+            // reducers so there is one source of truth for the connect path.
+            Message::TrayConnectProfile(name) => self.update(Message::ConnectProfile(name)),
+            Message::TrayDisconnect => self.update(Message::DisconnectCurrent),
+            Message::ImportFromQr => {
+                Task::perform(pick_qr_image_file(), Message::ImportFromQrChosen)
+            }
+            Message::ImportFromQrChosen(maybe_path) => match maybe_path {
+                Some(path) => {
+                    let store = self.profile_store.clone();
+                    Task::perform(
+                        async move { import_from_qr(&store, &path).await },
+                        Message::ImportResult,
+                    )
+                }
+                None => Task::none(), // dialog cancelled
+            },
         }
     }
 
@@ -1380,6 +1497,18 @@ impl State {
     fn save_settings_task(&self) -> Task<Message> {
         let settings = self.settings.clone();
         Task::perform(async move { settings.save() }, Message::SettingsSaved)
+    }
+
+    /// Build a fire-and-forget persist-usage task (feature 2). The save result is
+    /// discarded (`.discard()` → no follow-up message) — a failed usage write is
+    /// best-effort and must not interrupt the status-tick flow or clobber the
+    /// current banner.
+    fn save_usage_task(&self) -> Task<Message> {
+        let store = self.usage_store.clone();
+        Task::future(async move {
+            let _ = store.save();
+        })
+        .discard()
     }
 
     /// Refresh live status (for the active interface) and the public IP.
@@ -1499,6 +1628,14 @@ impl State {
             }
             let delay = watchdog::next_backoff(self.reconnect_attempt);
             self.reconnect_attempt = self.reconnect_attempt.saturating_add(1);
+            // Feature 1: desktop notification on an unexpected drop (gated on the
+            // setting). Only fire on the first detection of this drop — i.e. while we
+            // are not yet mid-reconnect — so repeated ticks during back-off don't spam
+            // the daemon. `reconnect_attempt` was 0 here on the first drop (it has just
+            // been incremented above), so guard on the pre-increment value.
+            if self.settings.notifications_enabled && self.reconnect_attempt == 1 {
+                crate::notify::notify_dropped(&name);
+            }
             self.set_banner(
                 BannerKind::Warning,
                 format!("Tunnel dropped — reconnecting to {name} in {}s…", delay.as_secs()),
@@ -1714,6 +1851,33 @@ async fn pick_import_file() -> Option<PathBuf> {
         .map(|handle| handle.path().to_owned())
 }
 
+/// Open a native file picker for a QR-code image to import (feature 4).
+async fn pick_qr_image_file() -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .add_filter("QR image", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
+        .set_title("Import WireGuard profile from QR image")
+        .pick_file()
+        .await
+        .map(|handle| handle.path().to_owned())
+}
+
+/// Decode a QR image into `.conf` text, parse it into a [`WgProfile`], and persist
+/// it to the store — the QR analogue of [`ProfileStore::import_from_path`]
+/// (feature 4). The profile name is taken from the image file stem.
+async fn import_from_qr(store: &ProfileStore, path: &std::path::Path) -> Result<WgProfile, AppError> {
+    let conf = crate::config::qr_import::decode_qr_image(path)?;
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("qr-import")
+        .to_owned();
+    let mut profile = WgProfile::from_conf_str(&name, &conf)
+        .map_err(|e| AppError::ImportFailed(e.to_string()))?;
+    store.create_profile(&profile).await?;
+    profile.path = Some(store.dir.join(format!("{name}.conf")));
+    Ok(profile)
+}
+
 /// Open a native save dialog for exporting profile `name` as a `.conf`.
 async fn pick_export_file(name: String) -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
@@ -1800,6 +1964,8 @@ fn tray_event_stream() -> impl iced::futures::Stream<Item = Message> {
                 let msg = match event {
                     TrayEvent::Open => Message::TrayOpen,
                     TrayEvent::Quit => Message::TrayQuit,
+                    TrayEvent::ConnectProfile(name) => Message::TrayConnectProfile(name),
+                    TrayEvent::Disconnect => Message::TrayDisconnect,
                 };
                 if output.send(msg).await.is_err() {
                     break;

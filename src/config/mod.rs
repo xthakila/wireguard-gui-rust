@@ -2,6 +2,7 @@
 
 pub mod keygen;
 pub mod profile;
+pub mod qr_import;
 pub mod store;
 
 use std::fmt;

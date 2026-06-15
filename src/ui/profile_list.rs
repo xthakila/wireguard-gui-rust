@@ -332,6 +332,13 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         .padding([SPACE_SM, SPACE_MD])
         .style(theme::ghost());
 
+    // Import from QR image button (feature 4).
+    let qr_import_label = format!("{} QR Import", icons::IMPORT);
+    let qr_import_btn = button(text(qr_import_label).size(TEXT_BODY))
+        .on_press(Message::ImportFromQr)
+        .padding([SPACE_SM, SPACE_MD])
+        .style(theme::ghost());
+
     // New profile — primary CTA.
     let new_label = format!("{} New", icons::PLUS);
     let new_btn = button(text(new_label).size(TEXT_BODY))
@@ -357,6 +364,7 @@ fn toolbar(state: &State) -> Element<'_, Message> {
         search,
         sort_btn,
         import_btn,
+        qr_import_btn,
         new_btn,
         server_btn,
         settings_btn,
@@ -552,7 +560,24 @@ fn profile_card<'a>(
             color: Some(theme::palette(theme).muted),
         });
 
-    let name_col = column![name_text, subtitle_el].spacing(SPACE_XS);
+    // Optional total usage subtitle (feature 2): show lifetime rx/tx when available.
+    let usage_el: Option<iced::widget::Text<'_, iced::Theme>> =
+        state.usage_store.get(name.as_str()).map(|u| {
+            text(format!(
+                "\u{2193} {}  \u{2191} {} total",
+                format_bytes(u.total_rx),
+                format_bytes(u.total_tx),
+            ))
+            .size(TEXT_CAPTION)
+            .style(|theme: &iced::Theme| iced::widget::text::Style {
+                color: Some(theme::palette(theme).muted),
+            })
+        });
+
+    let mut name_col = column![name_text, subtitle_el].spacing(SPACE_XS);
+    if let Some(usage) = usage_el {
+        name_col = name_col.push(usage);
+    }
 
     // ── Right-hand section: status pill (active) + icon buttons ──────────────
     // Status pill — only on the active row.
@@ -664,4 +689,25 @@ fn profile_card<'a>(
             }
         })
         .into()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Format a byte count as KiB / MiB / GiB with one decimal place.
+fn format_bytes(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+
+    if bytes >= GIB {
+        format!("{:.1} GiB", bytes as f64 / GIB as f64)
+    } else if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
 }

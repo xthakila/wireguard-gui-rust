@@ -15,12 +15,13 @@ runtime, no `libappindicator` C dependency: a single small native binary.
 
 ## Status
 
-**v0.2.0 — client + server, 428 tests.** The client connect bug is fixed and **proven** (a real
-tunnel interface comes up via NetworkManager/`wg-quick`); the raw editor, tray, structured editor,
-Plan preview, and packaging all work. **Server mode** is implemented and proven to bring up a real
-`wg` interface with registered peers. Still wants hands-on testing on *your* machine with a real
-peer: a live end-to-end handshake, the kill-switch against live traffic, on-host NAT/forwarding, and
-connect-on-boot across a reboot (all require root + a real WireGuard endpoint).
+**v0.3.0 — polished UI + power features.** Client and server are both proven (a real WireGuard
+handshake forms between the app's own configs). This release adds a redesigned themed UI
+(connection dashboard, card-based lists, icon toolbar), desktop notifications, tray quick-connect,
+data-usage stats, QR config import, and an endpoint-health indicator. **515 tests, clippy-clean.**
+What still wants hands-on testing on *your* machine with a real peer: a live handshake to an
+external endpoint, the kill-switch against live traffic, on-host NAT/forwarding, and connect-on-boot
+across a reboot (these need root and — for the `pkexec` helper — the installed package).
 
 ## Features
 
@@ -39,7 +40,13 @@ connect-on-boot across a reboot (all require root + a real WireGuard endpoint).
 - **Server mode** — run this machine as a WireGuard server: create a server, add/remove client peers
   (each gets a ready `.conf` + a **QR code** for mobile), an internet-gateway toggle (NAT +
   forwarding), and start/stop with live per-peer status — coexists with the client
-- **Follow system light/dark** theme
+- **Desktop notifications** on connect / disconnect / dropped tunnel
+- **Tray quick-connect** — connect to any profile straight from the system-tray menu
+- **Data-usage stats** — per-profile session + cumulative transfer
+- **QR import** — add a profile by decoding a QR image (complements the server-side QR export)
+- **Endpoint health** — a handshake-freshness indicator on the connection dashboard
+- **Polished, themed UI** (follows system light/dark) — a connection dashboard with live transfer,
+  card-based profile/peer lists, an icon toolbar, and a shared blue-accent design language
 
 ## Install
 
@@ -47,7 +54,7 @@ Installing the GUI **also pulls in WireGuard** (`wireguard-tools`) automatically
 
 ### Debian / Ubuntu (`.deb`)
 ```sh
-sudo apt install ./wireguard-gui_0.2.1-1_amd64.deb   # resolves wireguard-tools for you
+sudo apt install ./wireguard-gui_0.3.0-1_amd64.deb   # resolves wireguard-tools for you
 ```
 
 ### AppImage (portable)

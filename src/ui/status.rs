@@ -26,6 +26,7 @@ use iced::{Alignment, Background, Color, Element, Length, Padding};
 
 use crate::app::{Message, State, TunnelStatus};
 use crate::ui::theme::{self, StatusKind};
+use crate::wg::latency::Health;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public entry point
@@ -231,6 +232,31 @@ fn stats_section(state: &State) -> Element<'_, Message> {
     let sparkline_data: Vec<(u64, u64)> = state.throughput_history.iter().copied().collect();
     let sparkline_el: Element<'_, Message> = bar_sparkline(&sparkline_data);
 
+    // Session usage from the usage store (feature 2).
+    let session_usage_str: String = if let Some(name) = &state.active_profile {
+        if let Some(u) = state.usage_store.get(name.as_str()) {
+            format!(
+                "Session \u{2193} {}  \u{2191} {}",
+                format_bytes(u.session_rx),
+                format_bytes(u.session_tx),
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // Health pill (feature 5): shown only when health is available.
+    let health_el: Option<Element<'_, Message>> = state.active_health.map(|h| {
+        let (label, kind) = match h {
+            Health::Good => ("Healthy", StatusKind::Connected),
+            Health::Stale => ("Stale", StatusKind::Connecting),
+            Health::Down => ("Down", StatusKind::Error),
+        };
+        theme::status_pill(label, kind)
+    });
+
     // Tiles layout: two rows of three.
     let row1 = row![
         stat_tile(
@@ -254,8 +280,11 @@ fn stats_section(state: &State) -> Element<'_, Message> {
             None::<Element<'_, Message>>,
         ),
         stat_tile("Public IP", ip_str.to_owned(), None::<Element<'_, Message>>),
-        // Spacer tile to keep the grid balanced.
-        iced::widget::Space::new().width(Length::Fill),
+        stat_tile(
+            "Health / Session",
+            session_usage_str,
+            health_el,
+        ),
     ]
     .spacing(theme::SPACE_SM);
 
