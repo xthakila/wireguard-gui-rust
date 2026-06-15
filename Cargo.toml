@@ -1,6 +1,6 @@
 [package]
 name = "wireguard-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 # The GUI (default binary, from src/main.rs) and the root helper (src/bin/helper.rs).

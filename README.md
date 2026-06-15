@@ -15,11 +15,12 @@ runtime, no `libappindicator` C dependency: a single small native binary.
 
 ## Status
 
-**v0.1.0 — feature-complete and unit-tested (300+ tests); the privileged paths need real-world
-validation.** The app builds cleanly, the UI runs, the tray works, and packaging is in place. What
-still wants hands-on testing on your machine: bringing up a *real* tunnel, the kill-switch against
-live traffic, per-app split tunnelling with a real peer, and connect-on-boot across a reboot — all
-of which require root and a real WireGuard endpoint.
+**v0.2.0 — client + server, 428 tests.** The client connect bug is fixed and **proven** (a real
+tunnel interface comes up via NetworkManager/`wg-quick`); the raw editor, tray, structured editor,
+Plan preview, and packaging all work. **Server mode** is implemented and proven to bring up a real
+`wg` interface with registered peers. Still wants hands-on testing on *your* machine with a real
+peer: a live end-to-end handshake, the kill-switch against live traffic, on-host NAT/forwarding, and
+connect-on-boot across a reboot (all require root + a real WireGuard endpoint).
 
 ## Features
 
@@ -35,6 +36,9 @@ of which require root and a real WireGuard endpoint.
   network if the app dies)
 - **Split tunnelling** — by destination (`AllowedIPs`) *and* per-application (network namespaces),
   as two independent, non-interfering subsystems
+- **Server mode** — run this machine as a WireGuard server: create a server, add/remove client peers
+  (each gets a ready `.conf` + a **QR code** for mobile), an internet-gateway toggle (NAT +
+  forwarding), and start/stop with live per-peer status — coexists with the client
 - **Follow system light/dark** theme
 
 ## Install
@@ -43,7 +47,7 @@ Installing the GUI **also pulls in WireGuard** (`wireguard-tools`) automatically
 
 ### Debian / Ubuntu (`.deb`)
 ```sh
-sudo apt install ./wireguard-gui_0.1.0-1_amd64.deb   # resolves wireguard-tools for you
+sudo apt install ./wireguard-gui_0.2.0-1_amd64.deb   # resolves wireguard-tools for you
 ```
 
 ### AppImage (portable)
