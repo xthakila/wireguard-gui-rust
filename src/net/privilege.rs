@@ -45,6 +45,22 @@ pub enum PrivCmd {
     /// `wg-quick down <iface>` — tear the tunnel down.
     WgQuickDown { iface: String },
 
+    /// Write the generated CLIENT `.conf` text to the helper-owned client conf path
+    /// (`/etc/wireguard/wg-gui0.conf`, 0600) so a subsequent `wg-quick up wg-gui0`
+    /// can read it.
+    ///
+    /// This is the AppArmor fix for the `wg-quick` fallback path: `wg-quick` is
+    /// AppArmor-confined to `/etc/wireguard`, so it cannot read a conf staged under
+    /// `/run` or `/tmp`. Like [`PrivCmd::ServerWriteConf`], the conf is delivered
+    /// in-band (not a path) so the unprivileged GUI never has to stage a
+    /// world-readable file holding the client's private key. Mirrors the server
+    /// `ServerWriteConf` flow exactly.
+    ClientWriteConf { conf_text: String },
+
+    /// Remove the helper-owned client conf (`/etc/wireguard/wg-gui0.conf`) on
+    /// disconnect. Idempotent — a missing file is not an error.
+    ClientRemoveConf,
+
     /// Arm the nftables kill-switch (table `inet wg_gui_killswitch`, output policy drop) with a
     /// lockout-prevention allow-list and a bounded lease backed by a root-side dead-man timer.
     ///
@@ -156,10 +172,10 @@ pub fn helper_argv(payload: &str) -> Vec<String> {
 /// installed [`HELPER_PATH`].
 fn helper_path() -> String {
     #[cfg(debug_assertions)]
-    if let Ok(p) = std::env::var(HELPER_BIN_ENV) {
-        if !p.is_empty() {
-            return p;
-        }
+    if let Ok(p) = std::env::var(HELPER_BIN_ENV)
+        && !p.is_empty()
+    {
+        return p;
     }
     HELPER_PATH.to_string()
 }
@@ -368,6 +384,30 @@ mod tests {
         let cmd = PrivCmd::WgQuickDown { iface: "wg-gui-home".into() };
         let back: PrivCmd = serde_json::from_str(&encode(&cmd).unwrap()).unwrap();
         assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn client_write_conf_round_trip() {
+        // The client conf-write mirrors ServerWriteConf: text delivered in-band so
+        // the GUI never stages the client private key world-readable.
+        let cmd = PrivCmd::ClientWriteConf {
+            conf_text: "[Interface]\nPrivateKey = x\nAddress = 10.0.0.2/32\n".into(),
+        };
+        let json = encode(&cmd).unwrap();
+        assert!(json.contains(r#""cmd":"ClientWriteConf""#), "json = {json}");
+        assert!(json.contains(r#""conf_text""#), "json = {json}");
+        let back: PrivCmd = serde_json::from_str(&json).unwrap();
+        assert_eq!(cmd, back);
+    }
+
+    #[test]
+    fn client_remove_conf_unit_variant() {
+        assert_eq!(
+            encode(&PrivCmd::ClientRemoveConf).unwrap(),
+            r#"{"cmd":"ClientRemoveConf"}"#
+        );
+        let back: PrivCmd = serde_json::from_str(r#"{"cmd":"ClientRemoveConf"}"#).unwrap();
+        assert_eq!(PrivCmd::ClientRemoveConf, back);
     }
 
     // ── SERVER-mode variants (freeze the wire shape) ─────────────────────────

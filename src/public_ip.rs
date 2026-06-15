@@ -24,12 +24,10 @@ fn fetch_public_ip_blocking() -> AppResult<String> {
     if let Ok(body) = ureq::get("https://1.1.1.1/cdn-cgi/trace")
         .call()
         .map(|r| r.into_string())
+        && let Ok(body_str) = body
+        && let Some(ip) = parse_cf_trace(&body_str)
     {
-        if let Ok(body_str) = body {
-            if let Some(ip) = parse_cf_trace(&body_str) {
-                return Ok(ip);
-            }
-        }
+        return Ok(ip);
     }
 
     // --- Fallback: ipify ---

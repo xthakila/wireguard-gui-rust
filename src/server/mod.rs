@@ -25,6 +25,11 @@
 
 pub mod manage;
 
+// Real root-only end-to-end handshake test (gated behind #[ignore]); compiled only
+// for test builds so it never affects the shipping binaries.
+#[cfg(test)]
+mod e2e;
+
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt as _;

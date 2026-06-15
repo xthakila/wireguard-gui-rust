@@ -337,13 +337,13 @@ impl WgProfile {
             }
 
             // PresharedKey (optional)
-            if let Some(psk) = &peer.preshared_key {
-                if !is_valid_wg_key(psk) {
-                    errors.push((
-                        ctx("PresharedKey"),
-                        "must be a valid base64-encoded 32-byte key".to_owned(),
-                    ));
-                }
+            if let Some(psk) = &peer.preshared_key
+                && !is_valid_wg_key(psk)
+            {
+                errors.push((
+                    ctx("PresharedKey"),
+                    "must be a valid base64-encoded 32-byte key".to_owned(),
+                ));
             }
 
             // AllowedIPs

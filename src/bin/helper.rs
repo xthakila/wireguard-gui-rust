@@ -47,6 +47,18 @@ const NFT_TABLE: &str = "inet wg_gui_killswitch";
 /// GUI, so the private key never lands world-readable.
 const SERVER_CONF_PATH: &str = "/etc/wireguard/wg-gui-srv0.conf";
 
+/// The CLIENT conf is written here (0600) by `ClientWriteConf`.
+///
+/// MUST live under `/etc/wireguard` (not `/run` or `/tmp`): `wg-quick` is
+/// AppArmor-confined to `/etc/wireguard`, so a conf staged elsewhere fails with
+/// `fopen: Permission denied` on NetworkManager-less systems. The basename MUST
+/// be `<CLIENT_IFACE>.conf` (`wg-gui0.conf`) because the GUI then runs
+/// `pkexec wg-quick up wg-gui0` by interface NAME — wg-quick reads
+/// `/etc/wireguard/wg-gui0.conf`. `CLIENT_IFACE` (`wg-gui0`) is the single source
+/// of truth in `src/wg/backend.rs`; this path mirrors it (a unit test in
+/// `src/wg/backend.rs` asserts the agreement).
+const CLIENT_CONF_PATH: &str = "/etc/wireguard/wg-gui0.conf";
+
 /// nftables NAT table used exclusively for server masquerade.
 /// Uniquely named so it never collides with user-managed tables or the
 /// kill-switch table.
@@ -101,20 +113,23 @@ fn run() -> AppResult<()> {
 
 /// Read the JSON payload from `--json <payload>` or, if absent, from stdin.
 fn read_payload() -> AppResult<String> {
+    // Only the FIRST argument selects the input mode; `--json` consumes the next
+    // argument as the payload, `-`/`--stdin` (or no argument at all) falls through to
+    // reading stdin. There is intentionally no loop here — the mode is decided by the
+    // single leading flag.
     let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--json" => {
-                return args.next().ok_or_else(|| {
-                    AppError::IpcFailed("--json requires a payload argument".into())
-                });
-            }
-            "-" | "--stdin" => break,
-            other => {
-                return Err(AppError::IpcFailed(format!(
-                    "unexpected argument: {other} (expected --json <payload> or --stdin)"
-                )));
-            }
+    match args.next().as_deref() {
+        Some("--json") => {
+            return args.next().ok_or_else(|| {
+                AppError::IpcFailed("--json requires a payload argument".into())
+            });
+        }
+        // Explicit stdin request, or no argument — fall through to stdin below.
+        Some("-") | Some("--stdin") | None => {}
+        Some(other) => {
+            return Err(AppError::IpcFailed(format!(
+                "unexpected argument: {other} (expected --json <payload> or --stdin)"
+            )));
         }
     }
     // Fall back to stdin.
@@ -136,6 +151,8 @@ fn dispatch(cmd: PrivCmd) -> AppResult<()> {
     match cmd {
         PrivCmd::WgQuickUp { iface, conf_path } => handle_wgquick_up(&iface, &conf_path),
         PrivCmd::WgQuickDown { iface } => handle_wgquick_down(&iface),
+        PrivCmd::ClientWriteConf { conf_text } => handle_client_write_conf(&conf_text),
+        PrivCmd::ClientRemoveConf => handle_client_remove_conf(),
         PrivCmd::KillSwitchArm {
             iface,
             endpoint_ip,
@@ -498,12 +515,11 @@ fn username_for_uid(uid: u32) -> AppResult<String> {
     })?;
     for line in passwd.lines() {
         let fields: Vec<&str> = line.splitn(7, ':').collect();
-        if fields.len() >= 4 {
-            if let Ok(line_uid) = fields[2].parse::<u32>() {
-                if line_uid == uid {
-                    return Ok(fields[0].to_string());
-                }
-            }
+        if fields.len() >= 4
+            && let Ok(line_uid) = fields[2].parse::<u32>()
+            && line_uid == uid
+        {
+            return Ok(fields[0].to_string());
         }
     }
     Err(AppError::NetnsFailed(format!(
@@ -724,10 +740,10 @@ fn handle_netns_teardown(ns: &str) -> AppResult<()> {
 
     // Remove /etc/netns/<ns> — best-effort (may not exist if DNS was not configured).
     let etc_path = format!("/etc/netns/{ns}");
-    if let Err(e) = std::fs::remove_dir_all(&etc_path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            eprintln!("helper: WARNING — could not remove {etc_path}: {e}");
-        }
+    if let Err(e) = std::fs::remove_dir_all(&etc_path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("helper: WARNING — could not remove {etc_path}: {e}");
     }
 
     Ok(())
@@ -790,6 +806,35 @@ fn handle_boot_disable_systemd(iface: &str) -> AppResult<()> {
 // nothing here runs in the GUI process.
 // ---------------------------------------------------------------------------
 
+/// Write `conf_text` to `path` under `/etc/wireguard`, creating the parent dir if
+/// needed and locking the file to mode 0600 (owner read/write only) because it
+/// holds a WireGuard private key.
+///
+/// Shared by [`handle_server_write_conf`] and [`handle_client_write_conf`] so both
+/// the server and client conf-write paths are byte-for-byte identical (single
+/// source of truth for the 0600-write semantics).
+fn write_conf_0600(path: &str, conf_text: &str) -> AppResult<()> {
+    // Ensure the parent directory exists (/etc/wireguard).
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AppError::IpcFailed(format!("cannot create dir {}: {e}", parent.display()))
+        })?;
+    }
+
+    // Write with O_CREAT | O_WRONLY | O_TRUNC and mode 0600.
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    let mut file = opts
+        .open(path)
+        .map_err(|e| AppError::IpcFailed(format!("cannot open {path}: {e}")))?;
+    use std::io::Write as _;
+    file.write_all(conf_text.as_bytes())
+        .map_err(|e| AppError::IpcFailed(format!("cannot write {path}: {e}")))?;
+
+    Ok(())
+}
+
 /// Write the server `.conf` text to the helper-owned server conf path
 /// (`wg-gui-srv0.conf`, mode 0600) for a subsequent `ServerUp`.
 ///
@@ -799,30 +844,33 @@ fn handle_boot_disable_systemd(iface: &str) -> AppResult<()> {
 /// server private key.
 fn handle_server_write_conf(conf_text: &str) -> AppResult<()> {
     eprintln!("helper: server write conf → {SERVER_CONF_PATH}");
+    write_conf_0600(SERVER_CONF_PATH, conf_text)
+}
 
-    // Ensure the parent directory exists (/etc/wireguard).
-    if let Some(parent) = std::path::Path::new(SERVER_CONF_PATH).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            AppError::IpcFailed(format!(
-                "cannot create dir {}: {e}",
-                parent.display()
-            ))
-        })?;
+/// Write the CLIENT `.conf` text to the helper-owned client conf path
+/// (`/etc/wireguard/wg-gui0.conf`, mode 0600) for a subsequent
+/// `pkexec wg-quick up wg-gui0`.
+///
+/// This is the AppArmor fix: `wg-quick` is confined to `/etc/wireguard`, so it
+/// cannot read a conf staged under `/run` or `/tmp`. Mirrors
+/// [`handle_server_write_conf`] exactly (same 0600 in-band write), differing only
+/// in the destination path.
+fn handle_client_write_conf(conf_text: &str) -> AppResult<()> {
+    eprintln!("helper: client write conf → {CLIENT_CONF_PATH}");
+    write_conf_0600(CLIENT_CONF_PATH, conf_text)
+}
+
+/// Remove the helper-owned client conf (`/etc/wireguard/wg-gui0.conf`) on
+/// disconnect. Idempotent — a missing file is treated as success.
+fn handle_client_remove_conf() -> AppResult<()> {
+    eprintln!("helper: client remove conf → {CLIENT_CONF_PATH}");
+    match std::fs::remove_file(CLIENT_CONF_PATH) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::IpcFailed(format!(
+            "cannot remove {CLIENT_CONF_PATH}: {e}"
+        ))),
     }
-
-    // Write with O_CREAT | O_WRONLY | O_TRUNC and mode 0600.
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true).mode(0o600);
-    let mut file = opts.open(SERVER_CONF_PATH).map_err(|e| {
-        AppError::IpcFailed(format!("cannot open {SERVER_CONF_PATH}: {e}"))
-    })?;
-    use std::io::Write as _;
-    file.write_all(conf_text.as_bytes()).map_err(|e| {
-        AppError::IpcFailed(format!("cannot write {SERVER_CONF_PATH}: {e}"))
-    })?;
-
-    Ok(())
 }
 
 /// Bring the server interface up: `wg-quick up <SERVER_CONF_PATH>`.
@@ -1319,6 +1367,21 @@ mod tests {
     #[test]
     fn server_conf_path_is_etc_wireguard() {
         assert_eq!(SERVER_CONF_PATH, "/etc/wireguard/wg-gui-srv0.conf");
+    }
+
+    #[test]
+    fn client_conf_path_is_etc_wireguard_with_iface_basename() {
+        // MUST be under /etc/wireguard (AppArmor confinement) and the basename MUST
+        // be <CLIENT_IFACE>.conf so `wg-quick up wg-gui0` resolves it by name.
+        assert_eq!(CLIENT_CONF_PATH, "/etc/wireguard/wg-gui0.conf");
+        assert!(
+            CLIENT_CONF_PATH.starts_with("/etc/wireguard/"),
+            "client conf must live under /etc/wireguard (AppArmor): {CLIENT_CONF_PATH}"
+        );
+        assert!(
+            CLIENT_CONF_PATH.ends_with("/wg-gui0.conf"),
+            "client conf basename must be wg-gui0.conf: {CLIENT_CONF_PATH}"
+        );
     }
 
     /// Verify the masquerade ruleset passes `nft -c -f <file>` (syntax check only —

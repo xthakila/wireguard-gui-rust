@@ -9,20 +9,15 @@ use crate::error::{AppError, AppResult};
 use crate::net::netns::NetnsRule;
 
 /// How the UI chooses its theme.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum ThemePreference {
     /// Follow the desktop's light/dark preference.
+    #[default]
     FollowSystem,
     Light,
     Dark,
     /// A specific named iced theme.
     Named(String),
-}
-
-impl Default for ThemePreference {
-    fn default() -> Self {
-        ThemePreference::FollowSystem
-    }
 }
 
 /// All user-configurable settings, persisted to disk as JSON.

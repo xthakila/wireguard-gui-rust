@@ -47,7 +47,7 @@ Installing the GUI **also pulls in WireGuard** (`wireguard-tools`) automatically
 
 ### Debian / Ubuntu (`.deb`)
 ```sh
-sudo apt install ./wireguard-gui_0.2.0-1_amd64.deb   # resolves wireguard-tools for you
+sudo apt install ./wireguard-gui_0.2.1-1_amd64.deb   # resolves wireguard-tools for you
 ```
 
 ### AppImage (portable)
@@ -96,6 +96,18 @@ Needs a recent stable Rust toolchain and the usual desktop build libs (`libxkbco
 `PrivCmd` and handed to a small helper that runs via `pkexec` under one polkit action
 (`org.wireguardgui.rust.manage`). The GUI and helper share the *exact* same `PrivCmd` definition so
 they can never drift.
+
+`wg-quick` is AppArmor-confined to `/etc/wireguard`, so the `wg-quick` fallback path routes the
+client conf through the helper exactly like the server does: `ClientWriteConf` writes the generated
+text to `/etc/wireguard/wg-gui0.conf` (0600, in-band so the private key never lands in a
+world-readable temp file), then the GUI runs `wg-quick up wg-gui0` *by interface name* (not a
+`/run`/`/tmp` path that AppArmor would reject); disconnect runs `wg-quick down wg-gui0` and
+`ClientRemoveConf`. The **NetworkManager** path is unaffected (NM reads the conf itself, unconfined).
+
+**End-to-end proof:** `src/server/e2e.rs::server_client_handshake_e2e` (gated `#[ignore]`, needs
+root) stands up a real tunnel between two network namespaces from the *app-generated* server/client
+configs and asserts a ping plus a recent handshake and non-zero transfer on both sides. Run it with
+`cargo test --bin wireguard-gui server::e2e -- --ignored --nocapture` as root.
 
 ## Tray on GNOME
 

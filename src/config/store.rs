@@ -57,10 +57,10 @@ impl ProfileStore {
                 let entry =
                     entry.map_err(|e| AppError::ProfileIo(format!("dir entry: {e}")))?;
                 let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("conf") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_owned());
-                    }
+                if path.extension().and_then(|e| e.to_str()) == Some("conf")
+                    && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                {
+                    names.push(stem.to_owned());
                 }
             }
             names.sort();

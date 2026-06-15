@@ -308,22 +308,21 @@ mod tests {
         // Spawn accept_raises into the tokio runtime.
         tokio::spawn(accept_raises(listener, tx));
 
-        // Connect once → expect one () on the channel.
+        // Connect once → expect one () on the channel. The channel item is `()`, so the
+        // `.expect()` chain (no timeout + channel still open) IS the assertion.
         let addr = addr_for(&name).expect("addr_for");
         let _s1 = UnixStream::connect_addr(&addr).expect("connect 1");
-        let got = timeout(Duration::from_millis(200), rx.recv())
+        timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("timed out waiting for first raise")
             .expect("channel closed before first raise");
-        assert_eq!(got, (), "expected unit");
 
         // Connect again → expect another ().
         let _s2 = UnixStream::connect_addr(&addr).expect("connect 2");
-        let got2 = timeout(Duration::from_millis(200), rx.recv())
+        timeout(Duration::from_millis(200), rx.recv())
             .await
             .expect("timed out waiting for second raise")
             .expect("channel closed before second raise");
-        assert_eq!(got2, (), "expected unit");
     }
 
     // -----------------------------------------------------------------------

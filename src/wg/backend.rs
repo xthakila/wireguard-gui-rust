@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::config::profile::WgProfile;
 use crate::error::{AppError, AppResult};
+use crate::net::privilege::{run_privileged, PrivCmd};
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -134,22 +135,24 @@ pub fn nm_list_active_argv() -> Vec<String> {
     ]
 }
 
-/// Build the `wg-quick up <conf_path>` argv (to be launched under pkexec).
-pub fn wgquick_up_argv(conf_path: &str) -> Vec<String> {
-    vec![
-        "wg-quick".to_string(),
-        "up".to_string(),
-        conf_path.to_string(),
-    ]
+/// Build the `wg-quick up <iface>` argv (to be launched under pkexec).
+///
+/// Takes the interface NAME ([`CLIENT_IFACE`] = `wg-gui0`), NOT a conf path:
+/// `wg-quick` is AppArmor-confined to `/etc/wireguard`, so it can only read
+/// `/etc/wireguard/wg-gui0.conf`. The conf is written there first by the helper
+/// (`PrivCmd::ClientWriteConf`), and `wg-quick up wg-gui0` then resolves the conf
+/// by interface name. Passing a `/run` or `/tmp` path here would fail with
+/// `fopen: Permission denied` under AppArmor.
+pub fn wgquick_up_argv(iface: &str) -> Vec<String> {
+    vec!["wg-quick".to_string(), "up".to_string(), iface.to_string()]
 }
 
-/// Build the `wg-quick down <conf_path>` argv (to be launched under pkexec).
-pub fn wgquick_down_argv(conf_path: &str) -> Vec<String> {
-    vec![
-        "wg-quick".to_string(),
-        "down".to_string(),
-        conf_path.to_string(),
-    ]
+/// Build the `wg-quick down <iface>` argv (to be launched under pkexec).
+///
+/// Takes the interface NAME ([`CLIENT_IFACE`] = `wg-gui0`) — symmetric with
+/// [`wgquick_up_argv`]; `wg-quick down wg-gui0` reads `/etc/wireguard/wg-gui0.conf`.
+pub fn wgquick_down_argv(iface: &str) -> Vec<String> {
+    vec!["wg-quick".to_string(), "down".to_string(), iface.to_string()]
 }
 
 // ---------------------------------------------------------------------------
@@ -345,38 +348,53 @@ impl WgBackend for NmBackend {
 
 /// `wg-quick`-backed implementation (uses `pkexec` for privilege elevation).
 ///
-/// The interface name derives from the conf basename, so the conf MUST be the
-/// stable `wg-gui0.conf` → wg-quick brings up interface [`CLIENT_IFACE`]. The
-/// conf is KEPT while connected (`wg-quick down <same path>` needs it) and
-/// removed on disconnect.
+/// AppArmor confines `wg-quick` to `/etc/wireguard`, so it CANNOT read a conf
+/// staged under `/run` or `/tmp` (the old behaviour failed with
+/// `fopen: Permission denied` on NetworkManager-less systems). The conf is
+/// therefore routed through the root helper EXACTLY like the server path:
 ///
-/// Connect: serialise the profile to `wg-gui0.conf`, run `pkexec wg-quick up <path>`.
-/// Disconnect: `pkexec wg-quick down <same path>`, then remove the conf.
+/// Connect:
+///   1. `PrivCmd::ClientWriteConf { conf_text }` → helper writes the conf to
+///      `/etc/wireguard/wg-gui0.conf` (0600) — in-band, so the GUI never stages
+///      the client private key world-readable.
+///   2. `pkexec wg-quick up wg-gui0` (interface NAME, not a path) → wg-quick reads
+///      `/etc/wireguard/wg-gui0.conf` from within its AppArmor profile.
+///
+/// Disconnect:
+///   1. `pkexec wg-quick down wg-gui0`.
+///   2. `PrivCmd::ClientRemoveConf` → helper removes `/etc/wireguard/wg-gui0.conf`
+///      (idempotent).
+///
+/// The interface is always the fixed [`CLIENT_IFACE`] (`wg-gui0`); the conf
+/// CONTENT comes from the profile.
 pub struct WgQuickBackend;
 
 #[async_trait::async_trait]
 impl WgBackend for WgQuickBackend {
     async fn connect(&self, profile: &WgProfile) -> AppResult<()> {
-        // Write to the stable wg-gui0.conf path and KEEP it (down needs it).
-        let conf_path = write_client_conf(profile).await?;
-        let conf_str = conf_path.to_string_lossy().into_owned();
-        let args = wgquick_up_argv(&conf_str);
+        // 1. Hand the generated conf TEXT to the helper, which writes it to
+        //    /etc/wireguard/wg-gui0.conf (0600) where AppArmor lets wg-quick read it.
+        let conf_text = profile.to_conf_string();
+        run_privileged(&PrivCmd::ClientWriteConf { conf_text }).await?;
+
+        // 2. Bring the tunnel up by interface NAME so wg-quick resolves
+        //    /etc/wireguard/wg-gui0.conf from within its AppArmor profile.
+        let args = wgquick_up_argv(CLIENT_IFACE);
         if let Err(e) = run_pkexec(&args).await {
-            // Connect failed → nothing is up, so drop the conf we just wrote.
-            remove_client_conf().await;
+            // Connect failed → nothing is up, so drop the conf the helper wrote.
+            let _ = run_privileged(&PrivCmd::ClientRemoveConf).await;
             return Err(e);
         }
         Ok(())
     }
 
     async fn disconnect(&self, _iface: &str) -> AppResult<()> {
-        // Bring the tunnel down using the SAME stable conf path it came up with,
-        // then remove the conf.
-        let conf_path = client_conf_path();
-        let conf_str = conf_path.to_string_lossy().into_owned();
-        let args = wgquick_down_argv(&conf_str);
+        // 1. Bring the tunnel down by interface NAME (wg-quick reads the same
+        //    /etc/wireguard/wg-gui0.conf it came up with).
+        let args = wgquick_down_argv(CLIENT_IFACE);
         let result = run_pkexec(&args).await;
-        remove_client_conf().await;
+        // 2. Remove the helper-owned conf regardless of the down outcome.
+        let _ = run_privileged(&PrivCmd::ClientRemoveConf).await;
         result?;
         Ok(())
     }
@@ -632,31 +650,36 @@ mod tests {
 
     #[test]
     fn wgquick_up_argv_golden() {
+        // wg-quick now takes the interface NAME (wg-gui0), NOT a conf path:
+        // AppArmor confines wg-quick to /etc/wireguard, so it reads
+        // /etc/wireguard/wg-gui0.conf resolved from the interface name.
         assert_eq!(
-            wgquick_up_argv("/run/user/1000/wireguard-gui/wg-gui0.conf"),
-            vec!["wg-quick", "up", "/run/user/1000/wireguard-gui/wg-gui0.conf"]
+            wgquick_up_argv(CLIENT_IFACE),
+            vec!["wg-quick", "up", "wg-gui0"]
         );
     }
 
     #[test]
     fn wgquick_down_argv_golden() {
         assert_eq!(
-            wgquick_down_argv("/run/user/1000/wireguard-gui/wg-gui0.conf"),
-            vec!["wg-quick", "down", "/run/user/1000/wireguard-gui/wg-gui0.conf"]
+            wgquick_down_argv(CLIENT_IFACE),
+            vec!["wg-quick", "down", "wg-gui0"]
         );
     }
 
     #[test]
-    fn wgquick_up_down_use_same_stable_path() {
-        // up and down must reference the SAME path so wg-quick can find the conf.
-        let path = client_conf_path();
-        let path = path.to_string_lossy();
-        let up = wgquick_up_argv(&path);
-        let down = wgquick_down_argv(&path);
-        assert_eq!(up, vec!["wg-quick", "up", path.as_ref()]);
-        assert_eq!(down, vec!["wg-quick", "down", path.as_ref()]);
-        // basename must be wg-gui0.conf
-        assert!(path.ends_with("wg-gui0.conf"), "path = {path}");
+    fn wgquick_up_down_use_same_iface_name() {
+        // up and down must reference the SAME interface name so wg-quick brings
+        // down exactly what it brought up — and it must be the fixed CLIENT_IFACE
+        // (a NAME, never a /run or /tmp path that AppArmor would reject).
+        let up = wgquick_up_argv(CLIENT_IFACE);
+        let down = wgquick_down_argv(CLIENT_IFACE);
+        assert_eq!(up, vec!["wg-quick", "up", CLIENT_IFACE]);
+        assert_eq!(down, vec!["wg-quick", "down", CLIENT_IFACE]);
+        // Argument is the bare interface name (no path separators), so wg-quick
+        // resolves /etc/wireguard/<iface>.conf within its AppArmor profile.
+        assert!(!CLIENT_IFACE.contains('/'), "iface must not be a path: {CLIENT_IFACE}");
+        assert_eq!(CLIENT_IFACE, "wg-gui0");
     }
 
     // -----------------------------------------------------------------------

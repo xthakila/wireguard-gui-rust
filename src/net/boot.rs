@@ -61,7 +61,7 @@ pub enum BootAction {
 /// # Arguments
 /// * `_profile_name` — ignored (identity/display only; see [`crate::wg::backend::CLIENT_IFACE`]).
 /// * `action` — [`BootAction::Enable`] sets `connection.autoconnect yes`;
-///              [`BootAction::Disable`] sets `connection.autoconnect no`.
+///   [`BootAction::Disable`] sets `connection.autoconnect no`.
 pub fn nm_autoconnect_argv(_profile_name: &str, action: BootAction) -> Vec<String> {
     let conn_name = crate::wg::backend::CLIENT_IFACE.to_string();
     let value = match action {
@@ -94,7 +94,7 @@ pub fn nm_autoconnect_argv(_profile_name: &str, action: BootAction) -> Vec<Strin
 /// # Arguments
 /// * `iface` — the full WireGuard interface name (e.g. `"wg-gui-home"`).
 /// * `action` — [`BootAction::Enable`] → [`PrivCmd::BootEnableSystemd`];
-///              [`BootAction::Disable`] → [`PrivCmd::BootDisableSystemd`].
+///   [`BootAction::Disable`] → [`PrivCmd::BootDisableSystemd`].
 pub fn systemd_boot_cmd(iface: &str, action: BootAction) -> PrivCmd {
     match action {
         BootAction::Enable => PrivCmd::BootEnableSystemd { iface: iface.to_string() },

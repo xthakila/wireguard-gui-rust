@@ -1916,8 +1916,11 @@ mod tests {
     #[test]
     fn kill_switch_lease_is_positive_and_reasonable() {
         // Must be long enough to outlast a polkit prompt + connect, but bounded so a
-        // dead GUI's kill-switch self-heals within an hour.
-        assert!(KILL_SWITCH_LEASE_SECS >= 60);
-        assert!(KILL_SWITCH_LEASE_SECS <= 86_400);
+        // dead GUI's kill-switch self-heals within an hour. These bounds are on a
+        // compile-time const, so assert them at compile time.
+        const {
+            assert!(KILL_SWITCH_LEASE_SECS >= 60);
+            assert!(KILL_SWITCH_LEASE_SECS <= 86_400);
+        }
     }
 }

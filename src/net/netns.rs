@@ -310,22 +310,22 @@ pub fn launch_argv(
     args: &[String],
     env_vars: &[(String, String)],
 ) -> Vec<String> {
-    let mut argv: Vec<String> = Vec::new();
+    // Fixed wrapper prefix: ip netns exec <ns> runuser -u <username> -- env
+    let mut argv: Vec<String> = vec![
+        "ip".into(),
+        "netns".into(),
+        "exec".into(),
+        ns.into(),
+        // Privilege drop: runuser -u <username> --
+        "runuser".into(),
+        "-u".into(),
+        username.into(),
+        "--".into(),
+        // Env forwarding follows: env KEY=VAL ...
+        "env".into(),
+    ];
 
-    // Wrapper: ip netns exec <ns>
-    argv.push("ip".into());
-    argv.push("netns".into());
-    argv.push("exec".into());
-    argv.push(ns.into());
-
-    // Privilege drop: runuser -u <username> --
-    argv.push("runuser".into());
-    argv.push("-u".into());
-    argv.push(username.into());
-    argv.push("--".into());
-
-    // Env forwarding: env KEY=VAL ...
-    argv.push("env".into());
+    // Env forwarding values.
     for (k, v) in env_vars {
         argv.push(format!("{}={}", k, v));
     }
@@ -357,7 +357,8 @@ pub fn parse_our_namespaces(ip_netns_list_output: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             // Each line is either just the name or "name (id: N)".
-            let name = line.trim().split_whitespace().next()?;
+            // `split_whitespace` already skips leading whitespace, so no trim needed.
+            let name = line.split_whitespace().next()?;
             if name.starts_with("wg-gui-") {
                 Some(name.to_string())
             } else {
