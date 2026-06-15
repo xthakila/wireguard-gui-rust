@@ -26,14 +26,33 @@ pub trait WgBackend: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Fixed client interface
+// ---------------------------------------------------------------------------
+
+/// The single, fixed kernel interface name used for the active client tunnel.
+///
+/// Linux interface names are capped at 15 chars (`IFNAMSIZ`). Deriving the name
+/// from the profile (`wg-gui-<profile_name>`) routinely exceeded that limit —
+/// `wg-gui-` is 7 chars and profile names may be up to 15, so the name could be
+/// up to 22 chars and `nmcli connection import` / `wg-quick` would reject it.
+///
+/// The kernel interface name is therefore decoupled from the profile name: the
+/// app is a single-active-client, so one fixed name (`wg-gui0`, 7 chars, always
+/// `<= 15`, namespaced) is correct. The profile name remains identity/display
+/// only (tracked in `app::State::active_profile`) and supplies the conf CONTENT.
+pub const CLIENT_IFACE: &str = "wg-gui0";
+
+// ---------------------------------------------------------------------------
 // Pure argv builders (testable without any I/O)
 // ---------------------------------------------------------------------------
 
-/// Connection name used in NetworkManager for a given profile.
+/// Connection name used in NetworkManager for the active client tunnel.
 ///
-/// Always `wg-gui-<profile_name>` so we can reliably find and remove it.
-pub fn nm_connection_name(profile_name: &str) -> String {
-    format!("wg-gui-{}", profile_name)
+/// Always the fixed [`CLIENT_IFACE`] (`wg-gui0`). The kernel interface name is
+/// decoupled from the profile name (see [`CLIENT_IFACE`]); the argument is kept
+/// only for call-site compatibility and is intentionally ignored.
+pub fn nm_connection_name(_profile_name: &str) -> String {
+    CLIENT_IFACE.to_string()
 }
 
 /// Build the `nmcli connection import` argv for a WireGuard `.conf` file.
@@ -76,6 +95,30 @@ pub fn nm_down_argv(conn_name: &str) -> Vec<String> {
         "connection".to_string(),
         "down".to_string(),
         conn_name.to_string(),
+    ]
+}
+
+/// Build the `nmcli connection delete <name>` argv.
+///
+/// Used to clear a stale connection before (re-)import and to remove the
+/// connection on disconnect. Callers ignore its error (a missing connection is
+/// not a failure).
+pub fn nm_delete_argv(conn_name: &str) -> Vec<String> {
+    vec![
+        "connection".to_string(),
+        "delete".to_string(),
+        conn_name.to_string(),
+    ]
+}
+
+/// Build the `nmcli connection modify <name> connection.autoconnect no` argv.
+pub fn nm_autoconnect_off_argv(conn_name: &str) -> Vec<String> {
+    vec![
+        "connection".to_string(),
+        "modify".to_string(),
+        conn_name.to_string(),
+        "connection.autoconnect".to_string(),
+        "no".to_string(),
     ]
 }
 
@@ -171,38 +214,64 @@ async fn run_pkexec(args: &[String]) -> AppResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Write a profile's conf text to a temporary file and return the path.
+/// The stable on-disk path of the active client's `.conf` file.
 ///
-/// The caller is responsible for cleanup (we do best-effort removal after
-/// each connect/disconnect call).
-async fn write_temp_conf(profile: &WgProfile) -> AppResult<PathBuf> {
+/// The basename MUST be `<CLIENT_IFACE>.conf` (`wg-gui0.conf`): NetworkManager
+/// derives the connection + interface name from the conf basename, and
+/// `wg-quick down` needs the same path the tunnel was brought up with. The file
+/// lives in a `wireguard-gui/` sub-directory under the user's runtime dir (or the
+/// system temp dir when no runtime dir is available).
+pub fn client_conf_path() -> PathBuf {
+    let base = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir);
+    base.join("wireguard-gui")
+        .join(format!("{}.conf", CLIENT_IFACE))
+}
+
+/// Write a profile's conf text to the stable client conf path and return it.
+///
+/// The file is intentionally KEPT after `connect` (wg-quick down needs it); it is
+/// removed on disconnect via [`remove_client_conf`].
+async fn write_client_conf(profile: &WgProfile) -> AppResult<PathBuf> {
     use tokio::io::AsyncWriteExt;
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("wg-gui-{}.conf", profile.name));
+    let path = client_conf_path();
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|e| {
+            AppError::ProfileIo(format!("cannot create conf dir: {}", e))
+        })?;
+    }
     let mut f = tokio::fs::File::create(&path).await.map_err(|e| {
-        AppError::ProfileIo(format!("cannot create temp conf: {}", e))
+        AppError::ProfileIo(format!("cannot create conf file: {}", e))
     })?;
     f.write_all(profile.to_conf_string().as_bytes())
         .await
-        .map_err(|e| AppError::ProfileIo(format!("cannot write temp conf: {}", e)))?;
+        .map_err(|e| AppError::ProfileIo(format!("cannot write conf file: {}", e)))?;
     Ok(path)
 }
 
-/// Parse `nmcli --terse --fields TYPE,NAME,DEVICE connection show --active` output.
+/// Best-effort removal of the stable client conf file (called on disconnect).
+async fn remove_client_conf() {
+    let _ = tokio::fs::remove_file(client_conf_path()).await;
+}
+
+/// Parse `nmcli --terse --fields TYPE,NAME,DEVICE connection show --active` output
+/// and report whether OUR client connection ([`CLIENT_IFACE`]) is active.
 ///
-/// Each terse output line has the form `TYPE:NAME:DEVICE`.
-/// Returns the first WireGuard device name (not connection name).
+/// Each terse output line has the form `TYPE:NAME:DEVICE`. We only recognise a
+/// WireGuard connection whose NAME or DEVICE equals [`CLIENT_IFACE`] — this must
+/// NOT report some other (e.g. server) WireGuard interface as the client.
+///
+/// Returns `Some(CLIENT_IFACE)` when our client connection is active, else `None`.
 pub fn parse_nm_active_wireguard(raw: &str) -> Option<String> {
     for line in raw.lines() {
         let parts: Vec<&str> = line.splitn(3, ':').collect();
         if parts.len() >= 3 {
             let conn_type = parts[0].trim();
+            let name = parts[1].trim();
             let device = parts[2].trim();
             if conn_type.eq_ignore_ascii_case("wireguard")
-                && !device.is_empty()
-                && device != "--"
+                && (name == CLIENT_IFACE || device == CLIENT_IFACE)
             {
-                return Some(device.to_string());
+                return Some(CLIENT_IFACE.to_string());
             }
         }
     }
@@ -215,49 +284,51 @@ pub fn parse_nm_active_wireguard(raw: &str) -> Option<String> {
 
 /// NetworkManager-backed implementation.
 ///
+/// The kernel interface name is fixed ([`CLIENT_IFACE`] = `wg-gui0`), decoupled
+/// from the profile name — see [`CLIENT_IFACE`] for why. The conf basename is
+/// `wg-gui0.conf`, so NM names the imported connection + interface `wg-gui0`.
+///
 /// Connect sequence:
-///   1. Serialise profile to a temp `.conf` file.
-///   2. Import via `nmcli connection import type wireguard file <path>`.
-///   3. Rename + set `autoconnect=no` via `nmcli connection modify`.
-///   4. Down any other active WireGuard connection first.
-///   5. `nmcli connection up <name>`.
+///   1. Serialise the profile to the stable `wg-gui0.conf` file.
+///   2. Delete any stale `wg-gui0` connection (ignore error) so re-import works.
+///   3. Import via `nmcli connection import type wireguard file <path>`.
+///   4. Best-effort `connection.autoconnect no` on `wg-gui0`.
+///   5. `nmcli connection up wg-gui0`.
+///
+/// We deliberately do NOT bring down other active WireGuard interfaces — the app
+/// must coexist with a future server interface.
 pub struct NmBackend;
 
 #[async_trait::async_trait]
 impl WgBackend for NmBackend {
     async fn connect(&self, profile: &WgProfile) -> AppResult<()> {
-        let conn_name = nm_connection_name(&profile.name);
-
-        // 1. Write temp conf
-        let conf_path = write_temp_conf(profile).await?;
+        // 1. Write the conf to the stable wg-gui0.conf path (kept while connected).
+        let conf_path = write_client_conf(profile).await?;
         let conf_str = conf_path.to_string_lossy().into_owned();
 
-        // 2. Import
-        let (import_args, _) = nm_import_argv(&conf_str, &conn_name);
+        // 2. Clear a stale connection so re-import succeeds (ignore "not found").
+        let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+
+        // 3. Import (NM derives the connection + interface name "wg-gui0" from the
+        //    conf basename).
+        let (import_args, _) = nm_import_argv(&conf_str, CLIENT_IFACE);
         run_nmcli(&import_args).await?;
 
-        // 3. Rename + autoconnect off (best-effort — may already be set)
-        let (_, modify_args) = nm_import_argv(&conf_str, &conn_name);
-        let _ = run_nmcli(&modify_args).await;
+        // 4. Disable autoconnect (best-effort — we drive up/down explicitly).
+        let _ = run_nmcli(&nm_autoconnect_off_argv(CLIENT_IFACE)).await;
 
-        // 4. Bring down any other active WireGuard connection
-        if let Ok(Some(active_dev)) = self.active_interface().await {
-            let down_args = nm_down_argv(&active_dev);
-            let _ = run_nmcli(&down_args).await;
-        }
-
-        // 5. Bring up this connection
-        run_nmcli(&nm_up_argv(&conn_name)).await?;
-
-        // Cleanup temp file (best-effort)
-        let _ = tokio::fs::remove_file(&conf_path).await;
+        // 5. Bring up our connection. (Do NOT touch other WireGuard interfaces.)
+        run_nmcli(&nm_up_argv(CLIENT_IFACE)).await?;
 
         Ok(())
     }
 
     async fn disconnect(&self, iface: &str) -> AppResult<()> {
-        let args = nm_down_argv(iface);
-        run_nmcli(&args).await?;
+        // Down then delete (ignore errors — either may already be gone), then
+        // remove the stable conf file.
+        let _ = run_nmcli(&nm_down_argv(iface)).await;
+        let _ = run_nmcli(&nm_delete_argv(iface)).await;
+        remove_client_conf().await;
         Ok(())
     }
 
@@ -274,42 +345,46 @@ impl WgBackend for NmBackend {
 
 /// `wg-quick`-backed implementation (uses `pkexec` for privilege elevation).
 ///
-/// Connect: serialise profile to a temp `.conf`, run `pkexec wg-quick up <path>`.
-/// Disconnect: locate system conf, run `pkexec wg-quick down <path>`.
+/// The interface name derives from the conf basename, so the conf MUST be the
+/// stable `wg-gui0.conf` → wg-quick brings up interface [`CLIENT_IFACE`]. The
+/// conf is KEPT while connected (`wg-quick down <same path>` needs it) and
+/// removed on disconnect.
+///
+/// Connect: serialise the profile to `wg-gui0.conf`, run `pkexec wg-quick up <path>`.
+/// Disconnect: `pkexec wg-quick down <same path>`, then remove the conf.
 pub struct WgQuickBackend;
-
-impl WgQuickBackend {
-    /// Return the `.conf` path for `iface`.
-    ///
-    /// Checks `/etc/wireguard/<iface>.conf` (system-wide); falls back to that
-    /// path even if it does not exist — wg-quick will produce a useful error.
-    fn conf_path_for_iface(&self, iface: &str) -> PathBuf {
-        PathBuf::from(format!("/etc/wireguard/{}.conf", iface))
-    }
-}
 
 #[async_trait::async_trait]
 impl WgBackend for WgQuickBackend {
     async fn connect(&self, profile: &WgProfile) -> AppResult<()> {
-        let conf_path = write_temp_conf(profile).await?;
+        // Write to the stable wg-gui0.conf path and KEEP it (down needs it).
+        let conf_path = write_client_conf(profile).await?;
         let conf_str = conf_path.to_string_lossy().into_owned();
         let args = wgquick_up_argv(&conf_str);
+        if let Err(e) = run_pkexec(&args).await {
+            // Connect failed → nothing is up, so drop the conf we just wrote.
+            remove_client_conf().await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    async fn disconnect(&self, _iface: &str) -> AppResult<()> {
+        // Bring the tunnel down using the SAME stable conf path it came up with,
+        // then remove the conf.
+        let conf_path = client_conf_path();
+        let conf_str = conf_path.to_string_lossy().into_owned();
+        let args = wgquick_down_argv(&conf_str);
         let result = run_pkexec(&args).await;
-        let _ = tokio::fs::remove_file(&conf_path).await;
+        remove_client_conf().await;
         result?;
         Ok(())
     }
 
-    async fn disconnect(&self, iface: &str) -> AppResult<()> {
-        let conf_path = self.conf_path_for_iface(iface);
-        let conf_str = conf_path.to_string_lossy().into_owned();
-        let args = wgquick_down_argv(&conf_str);
-        run_pkexec(&args).await?;
-        Ok(())
-    }
-
     async fn active_interface(&self) -> AppResult<Option<String>> {
-        // `wg show interfaces` prints a space-separated list of active WireGuard interfaces.
+        // `wg show interfaces` prints a space-separated list of active WireGuard
+        // interfaces. Report CLIENT_IFACE iff it is among them — never some other
+        // (server) interface.
         let output = Command::new("wg")
             .args(["show", "interfaces"])
             .output()
@@ -327,7 +402,8 @@ impl WgBackend for WgQuickBackend {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.split_whitespace().next().map(|s| s.to_string()))
+        let active = stdout.split_whitespace().any(|i| i == CLIENT_IFACE);
+        Ok(active.then(|| CLIENT_IFACE.to_string()))
     }
 }
 
@@ -372,13 +448,36 @@ async fn tool_on_path(program: &str) -> bool {
 mod tests {
     use super::*;
 
+    // --- CLIENT_IFACE invariant ---------------------------------------------
+
+    #[test]
+    fn client_iface_is_valid_kernel_name() {
+        // Must be <= 15 chars (IFNAMSIZ) and namespaced for this app.
+        assert!(CLIENT_IFACE.len() <= 15, "CLIENT_IFACE exceeds IFNAMSIZ");
+        assert_eq!(CLIENT_IFACE, "wg-gui0");
+    }
+
+    #[test]
+    fn client_conf_basename_matches_iface() {
+        // NM derives the connection + interface name from the conf basename, so
+        // the basename MUST be `<CLIENT_IFACE>.conf`.
+        let path = client_conf_path();
+        assert_eq!(
+            path.file_name().and_then(|s| s.to_str()),
+            Some("wg-gui0.conf")
+        );
+    }
+
     // --- nm_connection_name -------------------------------------------------
 
     #[test]
-    fn nm_conn_name_prefix() {
-        assert_eq!(nm_connection_name("home"), "wg-gui-home");
-        assert_eq!(nm_connection_name("work-vpn"), "wg-gui-work-vpn");
-        assert_eq!(nm_connection_name(""), "wg-gui-");
+    fn nm_conn_name_is_fixed_client_iface() {
+        // Decoupled from the profile name: always the fixed CLIENT_IFACE,
+        // regardless of (and short enough whatever) the profile name.
+        assert_eq!(nm_connection_name("home"), "wg-gui0");
+        assert_eq!(nm_connection_name("work-vpn"), "wg-gui0");
+        assert_eq!(nm_connection_name("homeserver-long-name"), "wg-gui0");
+        assert_eq!(nm_connection_name(""), "wg-gui0");
     }
 
     // --- nm_import_argv -----------------------------------------------------
@@ -386,7 +485,7 @@ mod tests {
     #[test]
     fn nm_import_argv_golden() {
         let (import, modify) =
-            nm_import_argv("/tmp/wg-gui-home.conf", "wg-gui-home");
+            nm_import_argv("/tmp/wg-gui0.conf", "wg-gui0");
 
         assert_eq!(
             import,
@@ -396,7 +495,7 @@ mod tests {
                 "type",
                 "wireguard",
                 "file",
-                "/tmp/wg-gui-home.conf",
+                "/tmp/wg-gui0.conf",
             ]
         );
 
@@ -405,9 +504,9 @@ mod tests {
             vec![
                 "connection",
                 "modify",
-                "wg-gui-home",
+                "wg-gui0",
                 "connection.id",
-                "wg-gui-home",
+                "wg-gui0",
                 "connection.autoconnect",
                 "no",
             ]
@@ -418,25 +517,47 @@ mod tests {
     fn nm_import_argv_path_with_spaces() {
         // Paths with spaces must land as a single argument — no shell quoting
         // needed because we pass argv arrays directly to Command::args().
-        let (import, _) = nm_import_argv("/tmp/my profiles/wg.conf", "wg-gui-x");
+        let (import, _) = nm_import_argv("/tmp/my profiles/wg.conf", "wg-gui0");
         assert_eq!(import[5], "/tmp/my profiles/wg.conf");
     }
 
-    // --- nm_up / nm_down argv -----------------------------------------------
+    // --- nm_up / nm_down / nm_delete / nm_autoconnect_off argv --------------
 
     #[test]
     fn nm_up_argv_golden() {
         assert_eq!(
-            nm_up_argv("wg-gui-home"),
-            vec!["connection", "up", "wg-gui-home"]
+            nm_up_argv("wg-gui0"),
+            vec!["connection", "up", "wg-gui0"]
         );
     }
 
     #[test]
     fn nm_down_argv_golden() {
         assert_eq!(
-            nm_down_argv("wg-gui-home"),
-            vec!["connection", "down", "wg-gui-home"]
+            nm_down_argv("wg-gui0"),
+            vec!["connection", "down", "wg-gui0"]
+        );
+    }
+
+    #[test]
+    fn nm_delete_argv_golden() {
+        assert_eq!(
+            nm_delete_argv("wg-gui0"),
+            vec!["connection", "delete", "wg-gui0"]
+        );
+    }
+
+    #[test]
+    fn nm_autoconnect_off_argv_golden() {
+        assert_eq!(
+            nm_autoconnect_off_argv("wg-gui0"),
+            vec![
+                "connection",
+                "modify",
+                "wg-gui0",
+                "connection.autoconnect",
+                "no",
+            ]
         );
     }
 
@@ -457,9 +578,23 @@ mod tests {
     // --- parse_nm_active_wireguard ------------------------------------------
 
     #[test]
-    fn parse_nm_active_finds_wg() {
-        let raw = "ethernet:Wired connection 1:eth0\nwireguard:wg-gui-home:wg0\n";
-        assert_eq!(parse_nm_active_wireguard(raw), Some("wg0".to_string()));
+    fn parse_nm_active_finds_our_client_by_name_and_device() {
+        // NM names our connection AND its device "wg-gui0" (from the conf basename).
+        let raw = "ethernet:Wired connection 1:eth0\nwireguard:wg-gui0:wg-gui0\n";
+        assert_eq!(parse_nm_active_wireguard(raw), Some("wg-gui0".to_string()));
+    }
+
+    #[test]
+    fn parse_nm_active_finds_our_client_by_name_only() {
+        // Match on NAME even if DEVICE column differs.
+        let raw = "wireguard:wg-gui0:wg5\n";
+        assert_eq!(parse_nm_active_wireguard(raw), Some("wg-gui0".to_string()));
+    }
+
+    #[test]
+    fn parse_nm_active_finds_our_client_by_device_only() {
+        let raw = "wireguard:Some Imported Name:wg-gui0\n";
+        assert_eq!(parse_nm_active_wireguard(raw), Some("wg-gui0".to_string()));
     }
 
     #[test]
@@ -474,22 +609,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_nm_active_skips_dash_device() {
-        // NM shows "--" for connections without a bound device
-        let raw = "wireguard:wg-gui-home:--\nwireguard:wg-gui-work:wg0\n";
-        assert_eq!(parse_nm_active_wireguard(raw), Some("wg0".to_string()));
+    fn parse_nm_active_ignores_other_wireguard_interface() {
+        // A future SERVER WireGuard interface must NOT be reported as the client.
+        let raw = "wireguard:wg-server:wg-server\nethernet:Wired:eth0\n";
+        assert_eq!(parse_nm_active_wireguard(raw), None);
+    }
+
+    #[test]
+    fn parse_nm_active_picks_client_among_others() {
+        // Our client coexisting with a server interface — only the client matches.
+        let raw = "wireguard:wg-server:wg-server\nwireguard:wg-gui0:wg-gui0\n";
+        assert_eq!(parse_nm_active_wireguard(raw), Some("wg-gui0".to_string()));
     }
 
     #[test]
     fn parse_nm_active_case_insensitive_type() {
-        let raw = "WireGuard:wg-gui-home:wg0\n";
-        assert_eq!(parse_nm_active_wireguard(raw), Some("wg0".to_string()));
-    }
-
-    #[test]
-    fn parse_nm_active_returns_first() {
-        let raw = "wireguard:wg-gui-a:wg0\nwireguard:wg-gui-b:wg1\n";
-        assert_eq!(parse_nm_active_wireguard(raw), Some("wg0".to_string()));
+        let raw = "WireGuard:wg-gui0:wg-gui0\n";
+        assert_eq!(parse_nm_active_wireguard(raw), Some("wg-gui0".to_string()));
     }
 
     // --- wgquick argv builders ----------------------------------------------
@@ -497,32 +633,157 @@ mod tests {
     #[test]
     fn wgquick_up_argv_golden() {
         assert_eq!(
-            wgquick_up_argv("/etc/wireguard/home.conf"),
-            vec!["wg-quick", "up", "/etc/wireguard/home.conf"]
+            wgquick_up_argv("/run/user/1000/wireguard-gui/wg-gui0.conf"),
+            vec!["wg-quick", "up", "/run/user/1000/wireguard-gui/wg-gui0.conf"]
         );
     }
 
     #[test]
     fn wgquick_down_argv_golden() {
         assert_eq!(
-            wgquick_down_argv("/etc/wireguard/home.conf"),
-            vec!["wg-quick", "down", "/etc/wireguard/home.conf"]
+            wgquick_down_argv("/run/user/1000/wireguard-gui/wg-gui0.conf"),
+            vec!["wg-quick", "down", "/run/user/1000/wireguard-gui/wg-gui0.conf"]
         );
     }
 
     #[test]
-    fn wgquick_up_argv_temp_path() {
-        let path = "/tmp/wg-gui-work-vpn.conf";
-        let argv = wgquick_up_argv(path);
-        assert_eq!(argv, vec!["wg-quick", "up", path]);
-        assert_eq!(argv.len(), 3);
+    fn wgquick_up_down_use_same_stable_path() {
+        // up and down must reference the SAME path so wg-quick can find the conf.
+        let path = client_conf_path();
+        let path = path.to_string_lossy();
+        let up = wgquick_up_argv(&path);
+        let down = wgquick_down_argv(&path);
+        assert_eq!(up, vec!["wg-quick", "up", path.as_ref()]);
+        assert_eq!(down, vec!["wg-quick", "down", path.as_ref()]);
+        // basename must be wg-gui0.conf
+        assert!(path.ends_with("wg-gui0.conf"), "path = {path}");
     }
 
-    #[test]
-    fn wgquick_down_argv_temp_path() {
-        let path = "/tmp/wg-gui-work-vpn.conf";
-        let argv = wgquick_down_argv(path);
-        assert_eq!(argv, vec!["wg-quick", "down", path]);
-        assert_eq!(argv.len(), 3);
+    // -----------------------------------------------------------------------
+    // Real end-to-end NetworkManager integration test.
+    //
+    // #[ignore] — needs `nmcli` + `wg` on PATH and a live NM session. Run with:
+    //     cargo test --package wireguard-gui-rust nm_connect_real_split_tunnel \
+    //         -- --ignored --nocapture
+    //
+    // SAFETY: this uses a SPLIT tunnel (AllowedIPs = 10.99.99.0/24) pointed at a
+    // dummy local endpoint (127.0.0.1:51820). It can never capture the default
+    // route or disrupt host networking. The point is to prove the IFNAMSIZ bug is
+    // FIXED: the profile name is LONG ("homeserver1", 18+ chars once prefixed),
+    // yet the kernel interface is the fixed `wg-gui0`, so import + up succeed.
+    // -----------------------------------------------------------------------
+
+    /// Run `wg genkey` / `wg pubkey` to mint a real WireGuard keypair.
+    fn gen_real_keypair() -> (String, String) {
+        use std::io::Write;
+        use std::process::{Command as SyncCommand, Stdio};
+
+        let priv_out = SyncCommand::new("wg")
+            .arg("genkey")
+            .output()
+            .expect("wg genkey should run");
+        assert!(priv_out.status.success(), "wg genkey failed");
+        let private_key = String::from_utf8(priv_out.stdout)
+            .expect("genkey utf8")
+            .trim()
+            .to_string();
+
+        let mut pub_child = SyncCommand::new("wg")
+            .arg("pubkey")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("wg pubkey should spawn");
+        pub_child
+            .stdin
+            .as_mut()
+            .expect("pubkey stdin")
+            .write_all(format!("{private_key}\n").as_bytes())
+            .expect("write privkey to pubkey");
+        let pub_out = pub_child.wait_with_output().expect("wg pubkey output");
+        assert!(pub_out.status.success(), "wg pubkey failed");
+        let public_key = String::from_utf8(pub_out.stdout)
+            .expect("pubkey utf8")
+            .trim()
+            .to_string();
+
+        (private_key, public_key)
+    }
+
+    #[tokio::test]
+    #[ignore = "needs nmcli + wg + a live NetworkManager session"]
+    async fn nm_connect_real_split_tunnel() {
+        use crate::config::profile::{InterfaceSection, PeerSection, WgProfile};
+
+        // Best-effort pre-clean of any stale connection from a prior failed run.
+        let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+
+        // A real client keypair, and a dummy peer pubkey (its private key is
+        // discarded — the peer never needs to actually respond).
+        let (client_priv, _client_pub) = gen_real_keypair();
+        let (_peer_priv, peer_pub) = gen_real_keypair();
+
+        // LONG profile name proves the IFNAMSIZ bug is fixed: "wg-gui-homeserver1"
+        // would be 18 chars and rejected; we use the fixed "wg-gui0" instead.
+        let profile = WgProfile {
+            name: "homeserver1".to_string(),
+            interface: InterfaceSection {
+                private_key: client_priv,
+                address: vec!["10.99.99.2/24".to_string()],
+                dns: vec![],
+                listen_port: None,
+                mtu: None,
+            },
+            peers: vec![PeerSection {
+                public_key: peer_pub,
+                preshared_key: None,
+                // SPLIT tunnel — only 10.99.99.0/24 routes through the tunnel.
+                endpoint: Some("127.0.0.1:51820".to_string()),
+                allowed_ips: vec!["10.99.99.0/24".to_string()],
+                persistent_keepalive: None,
+            }],
+            path: None,
+        };
+
+        let backend = NmBackend;
+
+        // Connect, then assert OUR fixed interface is active.
+        let connect_result = backend.connect(&profile).await;
+        if let Err(e) = &connect_result {
+            // Best-effort cleanup before surfacing the failure.
+            let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+            remove_client_conf().await;
+            panic!("connect(homeserver1) failed: {e}");
+        }
+
+        let active = backend.active_interface().await;
+        match &active {
+            Ok(Some(iface)) if iface == CLIENT_IFACE => {}
+            other => {
+                let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+                remove_client_conf().await;
+                panic!("expected active_interface == Some(\"wg-gui0\"), got {other:?}");
+            }
+        }
+
+        // Disconnect using the actual interface, then assert nothing is active.
+        let disconnect_result = backend.disconnect(CLIENT_IFACE).await;
+        if let Err(e) = &disconnect_result {
+            let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+            remove_client_conf().await;
+            panic!("disconnect(wg-gui0) failed: {e}");
+        }
+
+        let active_after = backend.active_interface().await;
+
+        // Final best-effort cleanup regardless of outcome.
+        let _ = run_nmcli(&nm_delete_argv(CLIENT_IFACE)).await;
+        remove_client_conf().await;
+
+        assert_eq!(
+            active_after.expect("active_interface query"),
+            None,
+            "wg-gui0 should be gone after disconnect"
+        );
     }
 }

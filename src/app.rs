@@ -480,17 +480,15 @@ impl State {
                 // User asked to disconnect — suppress auto-reconnect until they reconnect.
                 self.intentional_down = true;
                 self.reconnect_attempt = 0;
+                // Tear down the actual kernel interface: the live status interface
+                // if we have one, else the fixed client interface (`wg-gui0`).
+                // NEVER the profile name (identity/display only).
                 let iface = self
                     .live_status
                     .as_ref()
                     .map(|s| s.interface.clone())
-                    .or_else(|| self.active_profile.clone());
+                    .unwrap_or_else(|| crate::wg::backend::CLIENT_IFACE.to_string());
                 self.tunnel_status = TunnelStatus::Disconnecting;
-                let Some(iface) = iface else {
-                    self.set_banner(BannerKind::Warning, "No active tunnel to disconnect".to_owned());
-                    self.tunnel_status = TunnelStatus::Disconnected;
-                    return Task::none();
-                };
                 Task::perform(
                     async move {
                         let backend = detect_backend().await;
@@ -991,12 +989,17 @@ impl State {
     /// Refresh live status (for the active interface) and the public IP.
     fn status_refresh_task(&mut self) -> Task<Message> {
         self.public_ip_loading = true;
+        // The kernel interface is the fixed client interface (`wg-gui0`), NOT the
+        // profile name — the profile name is identity/display only. Query our
+        // live status against the live interface if known, else CLIENT_IFACE.
         let iface = self
             .live_status
             .as_ref()
             .map(|s| s.interface.clone())
             .or_else(|| match &self.tunnel_status {
-                TunnelStatus::Connected(name) | TunnelStatus::Connecting(name) => Some(name.clone()),
+                TunnelStatus::Connected(_) | TunnelStatus::Connecting(_) => {
+                    Some(crate::wg::backend::CLIENT_IFACE.to_string())
+                }
                 _ => None,
             });
         let status_task = Task::perform(
@@ -1016,8 +1019,8 @@ impl State {
     /// when the profile has no peer endpoint to punch through (arming without an
     /// allow-rule for the endpoint would lock the user out of reconnecting).
     ///
-    /// The interface name is derived from the live status if known, otherwise from
-    /// the NetworkManager connection-name convention (`wg-gui-<profile>`).
+    /// The interface name is derived from the live status if known, otherwise it is
+    /// the fixed client interface (`wg-gui0`, see [`crate::wg::backend::CLIENT_IFACE`]).
     /// `lan_cidrs` default to the user's configured `destination_split` (the local
     /// networks to keep reachable), or empty.
     fn arm_kill_switch_task(&self, profile_name: &str) -> Option<Task<Message>> {
@@ -1026,12 +1029,13 @@ impl State {
         let endpoint = profile.peers.iter().find_map(|p| p.endpoint.clone())?;
         let (endpoint_ip, endpoint_port) = split_endpoint(&endpoint)?;
 
-        // Interface as the kernel sees it: prefer the live status, else the NM name.
+        // Interface as the kernel sees it: prefer the live status, else the fixed
+        // client interface (`wg-gui0`).
         let iface = self
             .live_status
             .as_ref()
             .map(|s| s.interface.clone())
-            .unwrap_or_else(|| crate::wg::backend::nm_connection_name(profile_name));
+            .unwrap_or_else(|| crate::wg::backend::CLIENT_IFACE.to_string());
 
         let lan_cidrs = self.settings.destination_split.clone();
 
